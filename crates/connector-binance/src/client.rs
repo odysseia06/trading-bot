@@ -1,12 +1,12 @@
 use common::ExponentialBackoff;
 use connector_core::{ConnectorConfig, ConnectorError, EventSender};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use metrics::SharedMetrics;
 use model::MarketEvent;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::parser::{parse_message, ParsedMessage};
 
@@ -31,60 +31,102 @@ fn build_stream_url(symbols: &[String]) -> String {
     }
 }
 
+/// Result of a connection attempt.
+enum ConnectResult {
+    Connected(
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ),
+    Shutdown,
+    Error(ConnectorError),
+}
+
 /// Attempt to connect with timeout and shutdown check.
-async fn connect_with_timeout(
-    url: &str,
-    shutdown_rx: &mut watch::Receiver<bool>,
-) -> Result<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    ConnectorError,
-> {
+async fn connect_with_timeout(url: &str, shutdown_rx: &mut watch::Receiver<bool>) -> ConnectResult {
     tokio::select! {
         biased;
 
         // Check for shutdown during connection
         _ = shutdown_rx.changed() => {
             if *shutdown_rx.borrow() {
-                return Err(ConnectorError::ConnectionClosed);
+                return ConnectResult::Shutdown;
             }
-            // Spurious wakeup, continue with connection
-            match tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(url)).await {
-                Ok(Ok((stream, _))) => Ok(stream),
-                Ok(Err(e)) => Err(ConnectorError::WebSocket(e.to_string())),
-                Err(_) => Err(ConnectorError::WebSocket("connection timeout".to_string())),
-            }
+            // Spurious wakeup, fall through to connection attempt
         }
 
         // Connection with timeout
         result = tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(url)) => {
-            match result {
-                Ok(Ok((stream, _))) => Ok(stream),
-                Ok(Err(e)) => Err(ConnectorError::WebSocket(e.to_string())),
-                Err(_) => Err(ConnectorError::WebSocket("connection timeout".to_string())),
+            return match result {
+                Ok(Ok((stream, _))) => ConnectResult::Connected(stream),
+                Ok(Err(e)) => ConnectResult::Error(ConnectorError::WebSocket(e.to_string())),
+                Err(_) => ConnectResult::Error(ConnectorError::WebSocket("connection timeout".to_string())),
+            };
+        }
+    }
+
+    // Handle spurious wakeup case - try connection with shutdown check
+    tokio::select! {
+        biased;
+
+        _ = shutdown_rx.changed() => {
+            if *shutdown_rx.borrow() {
+                return ConnectResult::Shutdown;
             }
         }
+
+        result = tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(url)) => {
+            return match result {
+                Ok(Ok((stream, _))) => ConnectResult::Connected(stream),
+                Ok(Err(e)) => ConnectResult::Error(ConnectorError::WebSocket(e.to_string())),
+                Err(_) => ConnectResult::Error(ConnectorError::WebSocket("connection timeout".to_string())),
+            };
+        }
+    }
+
+    // If we get here, it's another spurious wakeup during the second select
+    // Just return shutdown if requested, otherwise error
+    if *shutdown_rx.borrow() {
+        ConnectResult::Shutdown
+    } else {
+        ConnectResult::Error(ConnectorError::WebSocket(
+            "connection interrupted".to_string(),
+        ))
     }
 }
 
+/// Result of a session.
+enum SessionResult {
+    /// Session ran and then shutdown was requested
+    Shutdown,
+    /// Session connected successfully (returns session duration when it ended)
+    Connected {
+        duration: Duration,
+        error: ConnectorError,
+    },
+    /// Failed to connect
+    ConnectFailed(ConnectorError),
+}
+
 /// Run a single WebSocket connection session.
-/// Returns Ok(()) if shutdown was requested, Err otherwise.
 async fn run_session(
     url: &str,
     sender: &EventSender,
     shutdown_rx: &mut watch::Receiver<bool>,
     metrics: &SharedMetrics,
-) -> Result<(), ConnectorError> {
+) -> SessionResult {
     info!(url = %url, "Connecting to Binance WebSocket");
 
-    let ws_stream = connect_with_timeout(url, shutdown_rx).await?;
+    let ws_stream = match connect_with_timeout(url, shutdown_rx).await {
+        ConnectResult::Connected(stream) => stream,
+        ConnectResult::Shutdown => return SessionResult::Shutdown,
+        ConnectResult::Error(e) => return SessionResult::ConnectFailed(e),
+    };
 
     info!("Connected to Binance WebSocket");
+    let connected_at = std::time::Instant::now();
 
-    // Note: tokio-tungstenite with tungstenite automatically responds to Ping frames
-    // with Pong frames at the protocol level. We don't need the write half for this
-    // basic read-only use case. The library handles Ping/Pong internally before
-    // surfacing messages to the application layer.
-    let (_write, mut read) = ws_stream.split();
+    let (mut write, mut read) = ws_stream.split();
 
     loop {
         tokio::select! {
@@ -94,7 +136,9 @@ async fn run_session(
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     info!("Shutdown signal received, closing connection");
-                    return Ok(());
+                    // Try to send close frame gracefully
+                    let _ = write.close().await;
+                    return SessionResult::Shutdown;
                 }
             }
 
@@ -105,11 +149,17 @@ async fn run_session(
                     Some(Err(e)) => {
                         error!(error = %e, "WebSocket error");
                         metrics.inc_websocket_errors();
-                        return Err(ConnectorError::WebSocket(e.to_string()));
+                        return SessionResult::Connected {
+                            duration: connected_at.elapsed(),
+                            error: ConnectorError::WebSocket(e.to_string()),
+                        };
                     }
                     None => {
                         info!("WebSocket stream ended");
-                        return Err(ConnectorError::ConnectionClosed);
+                        return SessionResult::Connected {
+                            duration: connected_at.elapsed(),
+                            error: ConnectorError::ConnectionClosed,
+                        };
                     }
                 };
 
@@ -121,7 +171,10 @@ async fn run_session(
                                 metrics.inc_trades_received();
                                 if sender.send(MarketEvent::Trade(trade)).await.is_err() {
                                     info!("Receiver dropped, stopping connector");
-                                    return Err(ConnectorError::ChannelClosed);
+                                    return SessionResult::Connected {
+                                        duration: connected_at.elapsed(),
+                                        error: ConnectorError::ChannelClosed,
+                                    };
                                 }
                             }
                             Ok(ParsedMessage::Unknown) => {
@@ -133,12 +186,24 @@ async fn run_session(
                             }
                         }
                     }
-                    Message::Ping(_) => {
-                        // tungstenite handles Pong response automatically at the protocol level
+                    Message::Ping(data) => {
+                        // Respond with Pong to keep connection alive
+                        debug!("Received Ping, sending Pong");
+                        if let Err(e) = write.send(Message::Pong(data)).await {
+                            warn!(error = %e, "Failed to send Pong");
+                            metrics.inc_websocket_errors();
+                            return SessionResult::Connected {
+                                duration: connected_at.elapsed(),
+                                error: ConnectorError::WebSocket(e.to_string()),
+                            };
+                        }
                     }
                     Message::Close(_) => {
                         info!("WebSocket closed by server");
-                        return Err(ConnectorError::ConnectionClosed);
+                        return SessionResult::Connected {
+                            duration: connected_at.elapsed(),
+                            error: ConnectorError::ConnectionClosed,
+                        };
                     }
                     _ => {}
                 }
@@ -161,7 +226,7 @@ pub async fn run_connector(
 ) -> Result<(), ConnectorError> {
     let url = build_stream_url(&config.symbols);
     let mut backoff = ExponentialBackoff::default();
-    let mut is_first_connect = true;
+    let mut needs_reconnect = false; // True after we've connected and then disconnected
 
     loop {
         // Check if shutdown was requested before attempting connection
@@ -170,35 +235,62 @@ pub async fn run_connector(
             return Ok(());
         }
 
-        let session_start = std::time::Instant::now();
-
         match run_session(&url, &sender, &mut shutdown_rx, &metrics).await {
-            Ok(()) => {
-                // Clean shutdown requested
+            SessionResult::Shutdown => {
+                // Clean shutdown requested - don't log as error or increment metrics
                 info!("Connector shutdown complete");
                 return Ok(());
             }
-            Err(ConnectorError::ChannelClosed) => {
-                // Receiver dropped, no point reconnecting
-                info!("Channel closed, exiting connector");
-                return Err(ConnectorError::ChannelClosed);
-            }
-            Err(e) => {
-                // Only count as reconnect attempt if this wasn't the first connection
-                if !is_first_connect {
-                    metrics.inc_reconnect_attempts();
+            SessionResult::Connected { duration, error } => {
+                // We were connected, now we're not - this is a reconnect scenario
+                if needs_reconnect {
+                    // We successfully reconnected (connected after a previous disconnect)
+                    metrics.inc_reconnect_successes();
                 }
-                is_first_connect = false;
 
-                let session_duration = session_start.elapsed();
+                // Now we need to reconnect
+                needs_reconnect = true;
 
-                // Reset backoff if connection was stable for a while
-                if session_duration >= STABLE_CONNECTION_THRESHOLD {
+                // Handle channel closed specially - no point reconnecting
+                if matches!(error, ConnectorError::ChannelClosed) {
+                    info!("Channel closed, exiting connector");
+                    return Err(ConnectorError::ChannelClosed);
+                }
+
+                // Reset backoff if connection was stable
+                if duration >= STABLE_CONNECTION_THRESHOLD {
                     info!(
-                        duration_secs = session_duration.as_secs(),
+                        duration_secs = duration.as_secs(),
                         "Connection was stable, resetting backoff"
                     );
                     backoff.reset();
+                }
+
+                metrics.inc_reconnect_attempts();
+
+                let delay = backoff.next_delay();
+                warn!(
+                    error = %error,
+                    attempt = backoff.attempt(),
+                    delay_secs = delay.as_secs_f64(),
+                    "Connection lost, reconnecting"
+                );
+
+                // Wait with shutdown check
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {}
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            info!("Shutdown requested during backoff");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            SessionResult::ConnectFailed(e) => {
+                // Failed to connect at all
+                if needs_reconnect {
+                    metrics.inc_reconnect_attempts();
                 }
 
                 let delay = backoff.next_delay();
@@ -206,14 +298,12 @@ pub async fn run_connector(
                     error = %e,
                     attempt = backoff.attempt(),
                     delay_secs = delay.as_secs_f64(),
-                    "Connection failed, reconnecting"
+                    "Connection failed, retrying"
                 );
 
                 // Wait with shutdown check
                 tokio::select! {
-                    _ = tokio::time::sleep(delay) => {
-                        // Continue to next iteration to attempt reconnect
-                    }
+                    _ = tokio::time::sleep(delay) => {}
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
                             info!("Shutdown requested during backoff");
@@ -223,9 +313,6 @@ pub async fn run_connector(
                 }
             }
         }
-
-        // If we reach here after backoff, we're about to attempt reconnection
-        // We'll count success only after run_session succeeds (tracked via stable connection)
     }
 }
 

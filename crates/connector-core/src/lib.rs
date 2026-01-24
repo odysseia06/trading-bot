@@ -15,6 +15,9 @@ pub enum ConnectorError {
 
     #[error("Connection closed")]
     ConnectionClosed,
+
+    #[error("Shutdown requested")]
+    Shutdown,
 }
 
 #[derive(Debug, Clone)]
