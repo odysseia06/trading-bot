@@ -1224,6 +1224,7 @@ dependencies = [
  "common",
  "connector-binance",
  "connector-core",
+ "dotenvy",
  "execution-core",
  "metrics",
  "model",

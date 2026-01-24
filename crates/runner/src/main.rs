@@ -62,6 +62,13 @@ fn print_usage() {
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if present (before anything else)
+    match dotenvy::dotenv() {
+        Ok(path) => eprintln!("Loaded environment from: {}", path.display()),
+        Err(dotenvy::Error::Io(_)) => {} // No .env file, that's fine
+        Err(e) => eprintln!("Warning: Failed to load .env file: {}", e),
+    }
+
     common::init_logging();
 
     // Parse command line arguments
