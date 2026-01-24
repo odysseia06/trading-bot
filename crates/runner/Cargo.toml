@@ -1,0 +1,17 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "market-connector"
+path = "src/main.rs"
+
+[dependencies]
+model = { workspace = true }
+connector-core = { workspace = true }
+connector-binance = { workspace = true }
+common = { workspace = true }
+metrics = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

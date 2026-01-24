@@ -1,0 +1,9 @@
+[package]
+name = "connector-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+model = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
