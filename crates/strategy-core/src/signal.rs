@@ -79,8 +79,10 @@ pub struct OrderIntent {
     pub order_type: OrderType,
     /// Quantity to trade.
     pub quantity: Decimal,
-    /// Limit price (required for limit orders).
+    /// Limit price (required for limit orders and stop-limit orders).
     pub price: Option<Decimal>,
+    /// Stop/trigger price (required for stop-loss and take-profit orders).
+    pub stop_price: Option<Decimal>,
     /// Time in force (optional, defaults to GTC for limit orders).
     pub time_in_force: Option<TimeInForce>,
 }
@@ -94,6 +96,7 @@ impl OrderIntent {
             order_type: OrderType::Market,
             quantity,
             price: None,
+            stop_price: None,
             time_in_force: None,
         }
     }
@@ -106,6 +109,7 @@ impl OrderIntent {
             order_type: OrderType::Market,
             quantity,
             price: None,
+            stop_price: None,
             time_in_force: None,
         }
     }
@@ -118,6 +122,7 @@ impl OrderIntent {
             order_type: OrderType::Limit,
             quantity,
             price: Some(price),
+            stop_price: None,
             time_in_force: Some(TimeInForce::GTC),
         }
     }
@@ -130,6 +135,7 @@ impl OrderIntent {
             order_type: OrderType::Limit,
             quantity,
             price: Some(price),
+            stop_price: None,
             time_in_force: Some(TimeInForce::GTC),
         }
     }
@@ -147,6 +153,7 @@ impl OrderIntent {
             order_type: OrderType::Limit,
             quantity,
             price: Some(price),
+            stop_price: None,
             time_in_force: Some(tif),
         }
     }
@@ -164,8 +171,105 @@ impl OrderIntent {
             order_type: OrderType::Limit,
             quantity,
             price: Some(price),
+            stop_price: None,
             time_in_force: Some(tif),
         }
+    }
+
+    /// Create a stop-loss order (market order triggered at stop price).
+    pub fn stop_loss(
+        symbol: impl Into<String>,
+        side: OrderSide,
+        quantity: Decimal,
+        stop_price: Decimal,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side,
+            order_type: OrderType::StopLoss,
+            quantity,
+            price: None,
+            stop_price: Some(stop_price),
+            time_in_force: None,
+        }
+    }
+
+    /// Create a stop-loss limit order (limit order triggered at stop price).
+    pub fn stop_loss_limit(
+        symbol: impl Into<String>,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Decimal,
+        stop_price: Decimal,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side,
+            order_type: OrderType::StopLossLimit,
+            quantity,
+            price: Some(price),
+            stop_price: Some(stop_price),
+            time_in_force: Some(TimeInForce::GTC),
+        }
+    }
+
+    /// Create a take-profit order (market order triggered at stop price).
+    pub fn take_profit(
+        symbol: impl Into<String>,
+        side: OrderSide,
+        quantity: Decimal,
+        stop_price: Decimal,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side,
+            order_type: OrderType::TakeProfit,
+            quantity,
+            price: None,
+            stop_price: Some(stop_price),
+            time_in_force: None,
+        }
+    }
+
+    /// Create a take-profit limit order (limit order triggered at stop price).
+    pub fn take_profit_limit(
+        symbol: impl Into<String>,
+        side: OrderSide,
+        quantity: Decimal,
+        price: Decimal,
+        stop_price: Decimal,
+    ) -> Self {
+        Self {
+            symbol: symbol.into(),
+            side,
+            order_type: OrderType::TakeProfitLimit,
+            quantity,
+            price: Some(price),
+            stop_price: Some(stop_price),
+            time_in_force: Some(TimeInForce::GTC),
+        }
+    }
+
+    /// Returns true if this order type requires a stop price.
+    pub fn requires_stop_price(&self) -> bool {
+        matches!(
+            self.order_type,
+            OrderType::StopLoss
+                | OrderType::StopLossLimit
+                | OrderType::TakeProfit
+                | OrderType::TakeProfitLimit
+        )
+    }
+
+    /// Returns true if this order type requires a limit price.
+    pub fn requires_price(&self) -> bool {
+        matches!(
+            self.order_type,
+            OrderType::Limit
+                | OrderType::StopLossLimit
+                | OrderType::TakeProfitLimit
+                | OrderType::LimitMaker
+        )
     }
 }
 

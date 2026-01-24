@@ -155,9 +155,16 @@ impl SignalProcessor {
             ));
         }
 
-        // Check for price on limit orders
-        if matches!(intent.order_type, OrderType::Limit) && intent.price.is_none() {
+        // Check for required price based on order type
+        if intent.requires_price() && intent.price.is_none() {
             return Err(SignalError::MissingPrice);
+        }
+
+        // Check for required stop price based on order type
+        if intent.requires_stop_price() && intent.stop_price.is_none() {
+            return Err(SignalError::InvalidOrder(
+                "stop order requires stop_price".to_string(),
+            ));
         }
 
         // Validate price if present
@@ -167,8 +174,40 @@ impl SignalProcessor {
                     "price must be positive".to_string(),
                 ));
             }
+        }
 
-            // Check notional value for limit orders
+        // Validate stop_price if present
+        if let Some(stop_price) = intent.stop_price {
+            if stop_price <= Decimal::ZERO {
+                return Err(SignalError::InvalidOrder(
+                    "stop_price must be positive".to_string(),
+                ));
+            }
+        }
+
+        // Validate notional based on order type
+        self.validate_order_notional(intent)?;
+
+        Ok(())
+    }
+
+    /// Validate notional value based on order type.
+    fn validate_order_notional(&self, intent: &OrderIntent) -> Result<(), SignalError> {
+        // Determine the price to use for notional calculation
+        let price_for_notional = match intent.order_type {
+            // Limit orders use the limit price
+            OrderType::Limit | OrderType::LimitMaker => intent.price,
+            // Stop-limit orders use the limit price (what we'll execute at)
+            OrderType::StopLossLimit | OrderType::TakeProfitLimit => intent.price,
+            // Stop market orders use the stop price (approximate execution price)
+            OrderType::StopLoss | OrderType::TakeProfit => intent.stop_price,
+            // Market orders cannot be validated without current market price
+            // We skip notional check for market orders - caller should ensure
+            // reasonable quantities
+            OrderType::Market => None,
+        };
+
+        if let Some(price) = price_for_notional {
             let notional = price * intent.quantity;
             self.validate_notional(notional)?;
         }
@@ -296,6 +335,7 @@ mod tests {
                 order_type: OrderType::Limit,
                 quantity: dec!(0.001),
                 price: None, // Missing price!
+                stop_price: None,
                 time_in_force: None,
             },
         );
@@ -316,6 +356,7 @@ mod tests {
                 order_type: OrderType::Market,
                 quantity: dec!(0), // Zero quantity!
                 price: None,
+                stop_price: None,
                 time_in_force: None,
             },
         );
@@ -337,5 +378,153 @@ mod tests {
         // Should succeed (no price to calculate notional)
         let result = processor.process(signal);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_stop_loss_missing_stop_price() {
+        let mut processor = make_processor();
+
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent {
+                symbol: "BTCUSDT".to_string(),
+                side: strategy_core::OrderSide::Sell,
+                order_type: OrderType::StopLoss,
+                quantity: dec!(0.001),
+                price: None,
+                stop_price: None, // Missing stop price!
+                time_in_force: None,
+            },
+        );
+
+        let result = processor.process(signal);
+        assert!(
+            matches!(result, Err(SignalError::InvalidOrder(msg)) if msg.contains("stop_price"))
+        );
+    }
+
+    #[test]
+    fn test_stop_loss_limit_missing_price() {
+        let mut processor = make_processor();
+
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent {
+                symbol: "BTCUSDT".to_string(),
+                side: strategy_core::OrderSide::Sell,
+                order_type: OrderType::StopLossLimit,
+                quantity: dec!(0.001),
+                price: None, // Missing limit price!
+                stop_price: Some(dec!(49000)),
+                time_in_force: None,
+            },
+        );
+
+        let result = processor.process(signal);
+        assert!(matches!(result, Err(SignalError::MissingPrice)));
+    }
+
+    #[test]
+    fn test_stop_loss_limit_missing_stop_price() {
+        let mut processor = make_processor();
+
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent {
+                symbol: "BTCUSDT".to_string(),
+                side: strategy_core::OrderSide::Sell,
+                order_type: OrderType::StopLossLimit,
+                quantity: dec!(0.001),
+                price: Some(dec!(49000)),
+                stop_price: None, // Missing stop price!
+                time_in_force: None,
+            },
+        );
+
+        let result = processor.process(signal);
+        assert!(
+            matches!(result, Err(SignalError::InvalidOrder(msg)) if msg.contains("stop_price"))
+        );
+    }
+
+    #[test]
+    fn test_stop_loss_valid() {
+        let mut processor = make_processor();
+
+        // Valid stop-loss order with proper notional (0.001 * 49000 = 49)
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent::stop_loss(
+                "BTCUSDT",
+                strategy_core::OrderSide::Sell,
+                dec!(0.001),
+                dec!(49000),
+            ),
+        );
+
+        let result = processor.process(signal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_stop_loss_notional_too_small() {
+        let mut processor = make_processor();
+
+        // 0.0001 * 50000 = 5, below $10 minimum
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent::stop_loss(
+                "BTCUSDT",
+                strategy_core::OrderSide::Sell,
+                dec!(0.0001),
+                dec!(50000),
+            ),
+        );
+
+        let result = processor.process(signal);
+        assert!(matches!(result, Err(SignalError::NotionalTooSmall(_, _))));
+    }
+
+    #[test]
+    fn test_take_profit_limit_valid() {
+        let mut processor = make_processor();
+
+        // Valid take-profit limit order
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent::take_profit_limit(
+                "BTCUSDT",
+                strategy_core::OrderSide::Sell,
+                dec!(0.001),
+                dec!(51000), // limit price
+                dec!(50500), // stop/trigger price
+            ),
+        );
+
+        let result = processor.process(signal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_invalid_stop_price() {
+        let mut processor = make_processor();
+
+        let signal = Signal::order(
+            "test_strategy",
+            OrderIntent {
+                symbol: "BTCUSDT".to_string(),
+                side: strategy_core::OrderSide::Sell,
+                order_type: OrderType::StopLoss,
+                quantity: dec!(0.001),
+                price: None,
+                stop_price: Some(dec!(-100)), // Negative stop price!
+                time_in_force: None,
+            },
+        );
+
+        let result = processor.process(signal);
+        assert!(
+            matches!(result, Err(SignalError::InvalidOrder(msg)) if msg.contains("stop_price"))
+        );
     }
 }
