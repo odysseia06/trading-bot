@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 auth = { workspace = true }
+common = { workspace = true }
 rest-client = { workspace = true }
 execution-core = { workspace = true }
 rust_decimal = { workspace = true }

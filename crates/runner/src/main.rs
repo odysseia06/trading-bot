@@ -6,9 +6,23 @@
 //! - Runs the strategy engine with registered strategies
 //! - Handles graceful shutdown on Ctrl+C
 //! - Reports health metrics periodically
+//!
+//! # Usage
+//!
+//! ```bash
+//! # Run with production (default)
+//! cargo run --release -- BTCUSDT ETHUSDT
+//!
+//! # Run with testnet
+//! BINANCE_ENVIRONMENT=testnet cargo run --release -- BTCUSDT
+//!
+//! # Or use --testnet flag
+//! cargo run --release -- --testnet BTCUSDT ETHUSDT
+//! ```
 
 use auth::ApiCredentials;
 use binance_rest::BinanceRestClient;
+use common::BinanceEnvironment;
 use connector_binance::{run_connector, run_user_data_stream, AccountUpdate};
 use connector_core::{create_event_channel, ConnectorConfig};
 use execution_core::{create_pending_order_registry, ExecutionReport};
@@ -26,9 +40,79 @@ use tracing::{error, info, warn};
 /// Interval for periodic health status logging.
 const HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
+fn print_usage() {
+    eprintln!("Usage: trading-bot [OPTIONS] [SYMBOLS...]");
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --testnet     Use Binance testnet (fake money)");
+    eprintln!("  --live        Enable live trading (requires API keys)");
+    eprintln!("  --help        Show this help message");
+    eprintln!();
+    eprintln!("Environment variables:");
+    eprintln!("  BINANCE_API_KEY       API key for authenticated requests");
+    eprintln!("  BINANCE_SECRET_KEY    Secret key for signing requests");
+    eprintln!("  BINANCE_ENVIRONMENT   'production' (default) or 'testnet'");
+    eprintln!();
+    eprintln!("Examples:");
+    eprintln!("  trading-bot                       # Stream BTCUSDT on production");
+    eprintln!("  trading-bot ETHUSDT BNBUSDT       # Stream multiple symbols");
+    eprintln!("  trading-bot --testnet BTCUSDT     # Use testnet");
+    eprintln!("  trading-bot --testnet --live      # Live trading on testnet");
+}
+
 #[tokio::main]
 async fn main() {
     common::init_logging();
+
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut use_testnet = false;
+    let mut live_trading = false;
+    let mut symbols = Vec::new();
+
+    for arg in &args {
+        match arg.as_str() {
+            "--testnet" | "-t" => use_testnet = true,
+            "--live" | "-l" => live_trading = true,
+            "--help" | "-h" => {
+                print_usage();
+                return;
+            }
+            s if s.starts_with('-') => {
+                eprintln!("Unknown option: {}", s);
+                print_usage();
+                std::process::exit(1);
+            }
+            symbol => symbols.push(symbol.to_string()),
+        }
+    }
+
+    // Determine environment: CLI flag takes precedence, then env var, then default
+    let environment = if use_testnet {
+        BinanceEnvironment::Testnet
+    } else {
+        BinanceEnvironment::from_env()
+    };
+
+    // Default symbol if none specified
+    if symbols.is_empty() {
+        symbols.push("BTCUSDT".to_string());
+    }
+
+    // Safety check: require --testnet for live trading unless explicitly on production
+    if live_trading && environment.is_production() {
+        warn!("Live trading on PRODUCTION with REAL MONEY!");
+        warn!("Press Ctrl+C within 5 seconds to abort...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    info!(
+        environment = %environment,
+        symbols = ?symbols,
+        live_trading = live_trading,
+        "Starting trading bot"
+    );
 
     // Try to load API credentials from environment
     let credentials = match ApiCredentials::from_env() {
@@ -41,23 +125,20 @@ async fn main() {
                 reason = %e,
                 "No API credentials found, running in read-only mode (market data only)"
             );
+            if live_trading {
+                error!(
+                    "--live requires API credentials. Set BINANCE_API_KEY and BINANCE_SECRET_KEY"
+                );
+                std::process::exit(1);
+            }
             None
         }
     };
 
-    let symbols = std::env::args().skip(1).collect::<Vec<_>>();
-
-    let symbols = if symbols.is_empty() {
-        vec!["BTCUSDT".to_string()]
-    } else {
-        symbols
-    };
-
-    info!(symbols = ?symbols, "Starting trading bot");
-
     let config = ConnectorConfig {
         symbols: symbols.clone(),
         channel_capacity: 1024,
+        environment,
     };
 
     let (sender, receiver) = create_event_channel(config.channel_capacity);
@@ -83,9 +164,13 @@ async fn main() {
 
     // Spawn user data stream task (if credentials available)
     let rest_client: Option<Arc<BinanceRestClient>> = if let Some(ref creds) = credentials {
-        match BinanceRestClient::new(creds.clone()) {
+        match BinanceRestClient::with_environment(creds.clone(), environment) {
             Ok(client) => {
                 let client = Arc::new(client);
+                info!(
+                    environment = %client.environment(),
+                    "Created REST client"
+                );
                 // Sync time with Binance server
                 if let Err(e) = client.sync_time().await {
                     warn!(error = %e, "Failed to sync server time, timestamps may be rejected");
@@ -162,7 +247,7 @@ async fn main() {
             min_order_notional: dec!(10),
             max_order_notional: dec!(100000),
             order_id_prefix: "bot".to_string(),
-            live_trading: false, // Dry run by default
+            live_trading,
         },
         stale_order_timeout_ms: 300_000, // 5 minutes
     };
@@ -192,11 +277,13 @@ async fn main() {
     let strategy = PriceThresholdStrategy::new("price_threshold_1", price_threshold_config);
     strategy_runner.register_strategy(Box::new(strategy));
 
+    let mode = if live_trading { "LIVE" } else { "DRY RUN" };
     info!(
         symbol = %primary_symbol,
         buy_threshold = 90000,
         sell_threshold = 100000,
-        "Registered price threshold strategy (DRY RUN mode)"
+        mode = mode,
+        "Registered price threshold strategy"
     );
 
     // Spawn strategy runner task

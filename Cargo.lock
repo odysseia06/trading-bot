@@ -76,6 +76,7 @@ name = "binance-rest"
 version = "0.1.0"
 dependencies = [
  "auth",
+ "common",
  "execution-core",
  "rest-client",
  "rust_decimal",
@@ -231,6 +232,7 @@ dependencies = [
 name = "connector-core"
 version = "0.1.0"
 dependencies = [
+ "common",
  "model",
  "thiserror 2.0.18",
  "tokio",

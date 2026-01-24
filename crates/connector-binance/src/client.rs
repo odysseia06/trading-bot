@@ -1,4 +1,4 @@
-use common::ExponentialBackoff;
+use common::{BinanceEnvironment, ExponentialBackoff};
 use connector_core::{ConnectorConfig, ConnectorError, EventSender};
 use futures_util::{SinkExt, StreamExt};
 use metrics::SharedMetrics;
@@ -10,24 +10,23 @@ use tracing::{debug, error, info, warn};
 
 use crate::parser::{parse_message, ParsedMessage};
 
-const BINANCE_WS_BASE: &str = "wss://stream.binance.com:9443";
-
 /// Duration of stable connection before resetting backoff.
 const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
 /// Timeout for WebSocket connection attempts.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn build_stream_url(symbols: &[String]) -> String {
+fn build_stream_url(symbols: &[String], environment: BinanceEnvironment) -> String {
+    let base_url = environment.ws_base_url();
     let streams: Vec<String> = symbols
         .iter()
         .map(|s| format!("{}@trade", s.to_lowercase()))
         .collect();
 
     if streams.len() == 1 {
-        format!("{}/ws/{}", BINANCE_WS_BASE, streams[0])
+        format!("{}/ws/{}", base_url, streams[0])
     } else {
-        format!("{}/stream?streams={}", BINANCE_WS_BASE, streams.join("/"))
+        format!("{}/stream?streams={}", base_url, streams.join("/"))
     }
 }
 
@@ -224,7 +223,7 @@ pub async fn run_connector(
     mut shutdown_rx: watch::Receiver<bool>,
     metrics: SharedMetrics,
 ) -> Result<(), ConnectorError> {
-    let url = build_stream_url(&config.symbols);
+    let url = build_stream_url(&config.symbols, config.environment);
     let mut backoff = ExponentialBackoff::default();
     let mut needs_reconnect = false; // True after we've had at least one connection attempt
 
@@ -322,19 +321,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_stream_url_single() {
+    fn test_build_stream_url_single_production() {
         let symbols = vec!["BTCUSDT".to_string()];
-        let url = build_stream_url(&symbols);
+        let url = build_stream_url(&symbols, BinanceEnvironment::Production);
         assert_eq!(url, "wss://stream.binance.com:9443/ws/btcusdt@trade");
     }
 
     #[test]
-    fn test_build_stream_url_multiple() {
+    fn test_build_stream_url_multiple_production() {
         let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
-        let url = build_stream_url(&symbols);
+        let url = build_stream_url(&symbols, BinanceEnvironment::Production);
         assert_eq!(
             url,
             "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/ethusdt@trade"
+        );
+    }
+
+    #[test]
+    fn test_build_stream_url_single_testnet() {
+        let symbols = vec!["BTCUSDT".to_string()];
+        let url = build_stream_url(&symbols, BinanceEnvironment::Testnet);
+        assert_eq!(url, "wss://testnet.binance.vision/ws/btcusdt@trade");
+    }
+
+    #[test]
+    fn test_build_stream_url_multiple_testnet() {
+        let symbols = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let url = build_stream_url(&symbols, BinanceEnvironment::Testnet);
+        assert_eq!(
+            url,
+            "wss://testnet.binance.vision/stream?streams=btcusdt@trade/ethusdt@trade"
         );
     }
 }

@@ -1,3 +1,4 @@
+use common::BinanceEnvironment;
 use model::MarketEvent;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -22,8 +23,12 @@ pub enum ConnectorError {
 
 #[derive(Debug, Clone)]
 pub struct ConnectorConfig {
+    /// Symbols to subscribe to.
     pub symbols: Vec<String>,
+    /// Channel buffer capacity.
     pub channel_capacity: usize,
+    /// Binance environment (production or testnet).
+    pub environment: BinanceEnvironment,
 }
 
 impl Default for ConnectorConfig {
@@ -31,6 +36,7 @@ impl Default for ConnectorConfig {
         Self {
             symbols: vec!["BTCUSDT".to_string()],
             channel_capacity: 1024,
+            environment: BinanceEnvironment::default(),
         }
     }
 }

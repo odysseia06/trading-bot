@@ -5,14 +5,12 @@ use crate::responses::{
     ListenKeyResponse, NewOrderResponse, OrderQueryResponse, ServerTimeResponse,
 };
 use auth::{ApiCredentials, RequestSigner};
+use common::BinanceEnvironment;
 use execution_core::{OrderSide, OrderType, TimeInForce};
 use rest_client::RestClient;
 use rust_decimal::Decimal;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
-
-/// Binance REST API base URL.
-const BINANCE_REST_BASE: &str = "https://api.binance.com";
 
 /// Request timeout for Binance API calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -21,12 +19,13 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct BinanceRestClient {
     client: RestClient,
     credentials: ApiCredentials,
+    environment: BinanceEnvironment,
     /// Time offset between local clock and Binance server (local - server).
     time_offset_ms: AtomicI64,
 }
 
 impl BinanceRestClient {
-    /// Create a new Binance REST client.
+    /// Create a new Binance REST client for production.
     ///
     /// # Arguments
     /// * `credentials` - API credentials for authenticated requests
@@ -34,13 +33,34 @@ impl BinanceRestClient {
     /// # Errors
     /// Returns an error if the HTTP client cannot be built.
     pub fn new(credentials: ApiCredentials) -> Result<Self, BinanceRestError> {
-        let client = RestClient::new(BINANCE_REST_BASE, REQUEST_TIMEOUT)?;
+        Self::with_environment(credentials, BinanceEnvironment::Production)
+    }
+
+    /// Create a new Binance REST client for a specific environment.
+    ///
+    /// # Arguments
+    /// * `credentials` - API credentials for authenticated requests
+    /// * `environment` - Production or Testnet
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn with_environment(
+        credentials: ApiCredentials,
+        environment: BinanceEnvironment,
+    ) -> Result<Self, BinanceRestError> {
+        let client = RestClient::new(environment.rest_base_url(), REQUEST_TIMEOUT)?;
 
         Ok(Self {
             client,
             credentials,
+            environment,
             time_offset_ms: AtomicI64::new(0),
         })
+    }
+
+    /// Get the environment this client is connected to.
+    pub fn environment(&self) -> BinanceEnvironment {
+        self.environment
     }
 
     /// Get the API key (for logging/debugging).
@@ -342,7 +362,8 @@ impl BinanceRestClient {
 impl std::fmt::Debug for BinanceRestClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BinanceRestClient")
-            .field("base_url", &BINANCE_REST_BASE)
+            .field("environment", &self.environment)
+            .field("base_url", &self.environment.rest_base_url())
             .field("api_key", &self.credentials.api_key())
             .field(
                 "time_offset_ms",

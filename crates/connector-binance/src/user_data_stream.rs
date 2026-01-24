@@ -19,8 +19,6 @@ use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
-const BINANCE_WS_BASE: &str = "wss://stream.binance.com:9443";
-
 /// Listen key refresh interval (30 minutes).
 /// Keys expire after 60 minutes, so we refresh at half that time.
 const LISTEN_KEY_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -152,7 +150,8 @@ async fn run_user_data_session(
     metrics: &SharedMetrics,
     pending_orders: &SharedPendingOrderRegistry,
 ) -> SessionResult {
-    let url = format!("{}/ws/{}", BINANCE_WS_BASE, listen_key);
+    let ws_base = rest_client.environment().ws_base_url();
+    let url = format!("{}/ws/{}", ws_base, listen_key);
 
     // Connect with timeout
     let ws_stream = match tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(&url)).await {

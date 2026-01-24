@@ -1,6 +1,8 @@
 mod backoff;
+mod environment;
 
 pub use backoff::ExponentialBackoff;
+pub use environment::{BinanceEnvironment, ParseEnvironmentError};
 
 use tracing_subscriber::{fmt, EnvFilter};
 
