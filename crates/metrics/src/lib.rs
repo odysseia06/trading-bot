@@ -291,4 +291,157 @@ mod tests {
         assert!(secs.is_some());
         assert!(secs.unwrap() < 1.0);
     }
+
+    // HealthStatus boundary tests
+
+    #[test]
+    fn test_health_status_healthy_with_recent_trade() {
+        let snapshot = MetricsSnapshot {
+            trades_received: 100,
+            messages_received: 100,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 120.0,
+            trades_per_second: 0.83,
+            secs_since_last_trade: Some(5.0), // Recent trade
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_status_healthy_during_startup() {
+        // No trades yet, but uptime is short (still starting up)
+        let snapshot = MetricsSnapshot {
+            trades_received: 0,
+            messages_received: 0,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 10.0, // Short uptime
+            trades_per_second: 0.0,
+            secs_since_last_trade: None, // No trades yet
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_status_degraded_stale_data() {
+        let snapshot = MetricsSnapshot {
+            trades_received: 100,
+            messages_received: 100,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 120.0,
+            trades_per_second: 0.83,
+            secs_since_last_trade: Some(45.0), // Between 30s and 60s
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn test_health_status_degraded_no_trades_medium_uptime() {
+        // No trades and uptime between 30s and 60s
+        let snapshot = MetricsSnapshot {
+            trades_received: 0,
+            messages_received: 0,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 45.0, // Between thresholds
+            trades_per_second: 0.0,
+            secs_since_last_trade: None,
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Degraded);
+    }
+
+    #[test]
+    fn test_health_status_unhealthy_very_stale_data() {
+        let snapshot = MetricsSnapshot {
+            trades_received: 100,
+            messages_received: 100,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 300.0,
+            trades_per_second: 0.33,
+            secs_since_last_trade: Some(90.0), // Over 60s
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn test_health_status_unhealthy_no_trades_long_uptime() {
+        // No trades ever and uptime over 60s
+        let snapshot = MetricsSnapshot {
+            trades_received: 0,
+            messages_received: 0,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 120.0, // Long uptime
+            trades_per_second: 0.0,
+            secs_since_last_trade: None, // Never received trades
+            secs_since_last_error: None,
+        };
+
+        assert_eq!(snapshot.health_status(), HealthStatus::Unhealthy);
+    }
+
+    #[test]
+    fn test_health_status_boundary_at_30_seconds() {
+        // Exactly at 30s boundary - should still be healthy
+        let snapshot = MetricsSnapshot {
+            trades_received: 100,
+            messages_received: 100,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 120.0,
+            trades_per_second: 0.83,
+            secs_since_last_trade: Some(30.0), // Exactly at threshold
+            secs_since_last_error: None,
+        };
+
+        // At exactly 30s, it's not > 30, so still healthy
+        assert_eq!(snapshot.health_status(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_status_boundary_at_60_seconds() {
+        // Exactly at 60s boundary - should be degraded, not unhealthy
+        let snapshot = MetricsSnapshot {
+            trades_received: 100,
+            messages_received: 100,
+            parse_errors: 0,
+            websocket_errors: 0,
+            reconnect_attempts: 0,
+            reconnect_successes: 0,
+            uptime_secs: 120.0,
+            trades_per_second: 0.83,
+            secs_since_last_trade: Some(60.0), // Exactly at threshold
+            secs_since_last_error: None,
+        };
+
+        // At exactly 60s, it's not > 60, so degraded
+        assert_eq!(snapshot.health_status(), HealthStatus::Degraded);
+    }
 }

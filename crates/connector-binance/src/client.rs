@@ -15,6 +15,9 @@ const BINANCE_WS_BASE: &str = "wss://stream.binance.com:9443";
 /// Duration of stable connection before resetting backoff.
 const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
+/// Timeout for WebSocket connection attempts.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn build_stream_url(symbols: &[String]) -> String {
     let streams: Vec<String> = symbols
         .iter()
@@ -28,6 +31,41 @@ fn build_stream_url(symbols: &[String]) -> String {
     }
 }
 
+/// Attempt to connect with timeout and shutdown check.
+async fn connect_with_timeout(
+    url: &str,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    ConnectorError,
+> {
+    tokio::select! {
+        biased;
+
+        // Check for shutdown during connection
+        _ = shutdown_rx.changed() => {
+            if *shutdown_rx.borrow() {
+                return Err(ConnectorError::ConnectionClosed);
+            }
+            // Spurious wakeup, continue with connection
+            match tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(url)).await {
+                Ok(Ok((stream, _))) => Ok(stream),
+                Ok(Err(e)) => Err(ConnectorError::WebSocket(e.to_string())),
+                Err(_) => Err(ConnectorError::WebSocket("connection timeout".to_string())),
+            }
+        }
+
+        // Connection with timeout
+        result = tokio::time::timeout(CONNECTION_TIMEOUT, connect_async(url)) => {
+            match result {
+                Ok(Ok((stream, _))) => Ok(stream),
+                Ok(Err(e)) => Err(ConnectorError::WebSocket(e.to_string())),
+                Err(_) => Err(ConnectorError::WebSocket("connection timeout".to_string())),
+            }
+        }
+    }
+}
+
 /// Run a single WebSocket connection session.
 /// Returns Ok(()) if shutdown was requested, Err otherwise.
 async fn run_session(
@@ -38,12 +76,14 @@ async fn run_session(
 ) -> Result<(), ConnectorError> {
     info!(url = %url, "Connecting to Binance WebSocket");
 
-    let (ws_stream, _response) = connect_async(url)
-        .await
-        .map_err(|e| ConnectorError::WebSocket(e.to_string()))?;
+    let ws_stream = connect_with_timeout(url, shutdown_rx).await?;
 
     info!("Connected to Binance WebSocket");
 
+    // Note: tokio-tungstenite with tungstenite automatically responds to Ping frames
+    // with Pong frames at the protocol level. We don't need the write half for this
+    // basic read-only use case. The library handles Ping/Pong internally before
+    // surfacing messages to the application layer.
     let (_write, mut read) = ws_stream.split();
 
     loop {
@@ -94,7 +134,7 @@ async fn run_session(
                         }
                     }
                     Message::Ping(_) => {
-                        // tungstenite handles pong automatically
+                        // tungstenite handles Pong response automatically at the protocol level
                     }
                     Message::Close(_) => {
                         info!("WebSocket closed by server");
@@ -121,6 +161,7 @@ pub async fn run_connector(
 ) -> Result<(), ConnectorError> {
     let url = build_stream_url(&config.symbols);
     let mut backoff = ExponentialBackoff::default();
+    let mut is_first_connect = true;
 
     loop {
         // Check if shutdown was requested before attempting connection
@@ -143,8 +184,12 @@ pub async fn run_connector(
                 return Err(ConnectorError::ChannelClosed);
             }
             Err(e) => {
-                // Connection error, attempt reconnect
-                metrics.inc_reconnect_attempts();
+                // Only count as reconnect attempt if this wasn't the first connection
+                if !is_first_connect {
+                    metrics.inc_reconnect_attempts();
+                }
+                is_first_connect = false;
+
                 let session_duration = session_start.elapsed();
 
                 // Reset backoff if connection was stable for a while
@@ -167,7 +212,7 @@ pub async fn run_connector(
                 // Wait with shutdown check
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {
-                        metrics.inc_reconnect_successes();
+                        // Continue to next iteration to attempt reconnect
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
@@ -178,6 +223,9 @@ pub async fn run_connector(
                 }
             }
         }
+
+        // If we reach here after backoff, we're about to attempt reconnection
+        // We'll count success only after run_session succeeds (tracked via stable connection)
     }
 }
 

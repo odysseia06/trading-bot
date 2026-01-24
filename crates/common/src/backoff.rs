@@ -24,11 +24,18 @@ impl Default for ExponentialBackoff {
 }
 
 impl ExponentialBackoff {
+    /// Create a new ExponentialBackoff.
+    ///
+    /// # Arguments
+    /// * `base` - Initial delay duration
+    /// * `max_delay` - Maximum delay cap
+    /// * `jitter_factor` - Jitter as a fraction of delay (0.0 to 1.0). Negative values are clamped to 0.
     pub fn new(base: Duration, max_delay: Duration, jitter_factor: f64) -> Self {
         Self {
             base,
             max_delay,
-            jitter_factor,
+            // Clamp negative jitter to 0 to prevent gen_range panic
+            jitter_factor: jitter_factor.max(0.0),
             attempt: 0,
         }
     }
@@ -40,7 +47,11 @@ impl ExponentialBackoff {
 
         // Add jitter: random value in [-jitter_factor, +jitter_factor] of the delay
         let jitter_range = capped_delay.as_secs_f64() * self.jitter_factor;
-        let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+        let jitter = if jitter_range > 0.0 {
+            rand::thread_rng().gen_range(-jitter_range..=jitter_range)
+        } else {
+            0.0
+        };
         let final_secs = (capped_delay.as_secs_f64() + jitter).max(0.0);
 
         self.attempt = self.attempt.saturating_add(1);
@@ -126,5 +137,19 @@ mod tests {
 
         // Base is 10s, jitter is ±20%, so range is [8, 12]
         assert!(secs >= 8.0 && secs <= 12.0, "delay was {}", secs);
+    }
+
+    #[test]
+    fn test_backoff_negative_jitter_clamped() {
+        // Negative jitter should be clamped to 0, not panic
+        let mut backoff = ExponentialBackoff::new(
+            Duration::from_secs(1),
+            Duration::from_secs(60),
+            -0.5, // Negative jitter
+        );
+
+        // Should not panic, and should return deterministic value (no jitter)
+        let delay = backoff.next_delay();
+        assert_eq!(delay, Duration::from_secs(1));
     }
 }
