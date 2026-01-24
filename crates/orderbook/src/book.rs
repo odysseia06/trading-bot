@@ -1,8 +1,8 @@
 //! Order book implementation with sorted price levels.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-use ordered_float::OrderedFloat;
 use rust_decimal::Decimal;
 use tracing::warn;
 
@@ -11,16 +11,20 @@ use crate::level::PriceLevel;
 
 /// Local order book maintaining sorted bid and ask levels.
 ///
-/// Uses `BTreeMap` with `OrderedFloat` keys for efficient sorted access.
-/// Bids are stored with negated keys for descending order iteration.
+/// Uses `BTreeMap` with `Decimal` keys for precise price level tracking.
+/// - Bids use `Reverse<Decimal>` for descending order (highest first)
+/// - Asks use `Decimal` directly for ascending order (lowest first)
+///
+/// This ensures no precision loss compared to using `f64` keys.
 #[derive(Debug)]
 pub struct OrderBook {
     symbol: String,
-    /// Bids stored with negated price keys for descending order.
-    /// Key: -price (so iteration is highest to lowest)
-    bids: BTreeMap<OrderedFloat<f64>, Decimal>,
-    /// Asks stored with normal price keys for ascending order.
-    asks: BTreeMap<OrderedFloat<f64>, Decimal>,
+    /// Bids stored with Reverse<Decimal> keys for descending order.
+    /// Iteration yields highest price first.
+    bids: BTreeMap<Reverse<Decimal>, Decimal>,
+    /// Asks stored with Decimal keys for ascending order.
+    /// Iteration yields lowest price first.
+    asks: BTreeMap<Decimal, Decimal>,
     /// Last update ID for sequence tracking.
     last_update_id: Option<u64>,
     /// Whether the book has been initialized with a snapshot.
@@ -66,15 +70,13 @@ impl OrderBook {
 
         for (price, quantity) in bids {
             if !quantity.is_zero() {
-                let key = Self::bid_key(*price);
-                self.bids.insert(key, *quantity);
+                self.bids.insert(Reverse(*price), *quantity);
             }
         }
 
         for (price, quantity) in asks {
             if !quantity.is_zero() {
-                let key = Self::ask_key(*price);
-                self.asks.insert(key, *quantity);
+                self.asks.insert(*price, *quantity);
             }
         }
 
@@ -121,21 +123,19 @@ impl OrderBook {
 
         // Apply bid updates
         for (price, quantity) in bids {
-            let key = Self::bid_key(*price);
             if quantity.is_zero() {
-                self.bids.remove(&key);
+                self.bids.remove(&Reverse(*price));
             } else {
-                self.bids.insert(key, *quantity);
+                self.bids.insert(Reverse(*price), *quantity);
             }
         }
 
         // Apply ask updates
         for (price, quantity) in asks {
-            let key = Self::ask_key(*price);
             if quantity.is_zero() {
-                self.asks.remove(&key);
+                self.asks.remove(price);
             } else {
-                self.asks.insert(key, *quantity);
+                self.asks.insert(*price, *quantity);
             }
         }
 
@@ -148,7 +148,7 @@ impl OrderBook {
         self.bids
             .iter()
             .next()
-            .map(|(key, qty)| PriceLevel::new(Self::price_from_bid_key(*key), *qty))
+            .map(|(Reverse(price), qty)| PriceLevel::new(*price, *qty))
     }
 
     /// Returns the best (lowest) ask price level.
@@ -156,7 +156,7 @@ impl OrderBook {
         self.asks
             .iter()
             .next()
-            .map(|(key, qty)| PriceLevel::new(Self::price_from_ask_key(*key), *qty))
+            .map(|(price, qty)| PriceLevel::new(*price, *qty))
     }
 
     /// Returns the mid price (average of best bid and best ask).
@@ -188,7 +188,7 @@ impl OrderBook {
         self.bids
             .iter()
             .take(n)
-            .map(|(key, qty)| PriceLevel::new(Self::price_from_bid_key(*key), *qty))
+            .map(|(Reverse(price), qty)| PriceLevel::new(*price, *qty))
             .collect()
     }
 
@@ -197,20 +197,22 @@ impl OrderBook {
         self.asks
             .iter()
             .take(n)
-            .map(|(key, qty)| PriceLevel::new(Self::price_from_ask_key(*key), *qty))
+            .map(|(price, qty)| PriceLevel::new(*price, *qty))
             .collect()
     }
 
     /// Returns the total bid quantity up to and including the given price.
+    /// (i.e., all bids at or above the given price)
     pub fn bid_depth_at(&self, price: Decimal) -> Decimal {
-        let target_key = Self::bid_key(price);
-        self.bids.range(..=target_key).map(|(_, qty)| qty).sum()
+        // Bids are sorted descending (highest first via Reverse)
+        // We want all bids >= price, which in Reverse order means all keys <= Reverse(price)
+        self.bids.range(..=Reverse(price)).map(|(_, qty)| qty).sum()
     }
 
     /// Returns the total ask quantity up to and including the given price.
+    /// (i.e., all asks at or below the given price)
     pub fn ask_depth_at(&self, price: Decimal) -> Decimal {
-        let target_key = Self::ask_key(price);
-        self.asks.range(..=target_key).map(|(_, qty)| qty).sum()
+        self.asks.range(..=price).map(|(_, qty)| qty).sum()
     }
 
     /// Returns the total number of bid levels.
@@ -229,28 +231,6 @@ impl OrderBook {
         self.asks.clear();
         self.last_update_id = None;
         self.initialized = false;
-    }
-
-    // Helper to convert price to bid key (negated for descending order)
-    fn bid_key(price: Decimal) -> OrderedFloat<f64> {
-        use rust_decimal::prelude::ToPrimitive;
-        OrderedFloat(-price.to_f64().unwrap_or(0.0))
-    }
-
-    // Helper to convert price to ask key (normal for ascending order)
-    fn ask_key(price: Decimal) -> OrderedFloat<f64> {
-        use rust_decimal::prelude::ToPrimitive;
-        OrderedFloat(price.to_f64().unwrap_or(0.0))
-    }
-
-    // Helper to convert bid key back to price
-    fn price_from_bid_key(key: OrderedFloat<f64>) -> Decimal {
-        Decimal::try_from(-key.0).unwrap_or_default()
-    }
-
-    // Helper to convert ask key back to price
-    fn price_from_ask_key(key: OrderedFloat<f64>) -> Decimal {
-        Decimal::try_from(key.0).unwrap_or_default()
     }
 }
 
@@ -438,10 +418,10 @@ mod tests {
         ];
         book.apply_snapshot(&bids, &asks, 1000);
 
-        // Bid depth at 99.0 should include 100.0 and 99.0 (due to negated keys)
+        // Bid depth at 99.0 should include 100.0 and 99.0 (bids >= 99.0)
         assert_eq!(book.bid_depth_at(dec!(99.0)), dec!(3.0));
 
-        // Ask depth at 102.0 should include 101.0 and 102.0
+        // Ask depth at 102.0 should include 101.0 and 102.0 (asks <= 102.0)
         assert_eq!(book.ask_depth_at(dec!(102.0)), dec!(3.0));
     }
 
@@ -461,5 +441,55 @@ mod tests {
         assert!(book.best_bid().is_none());
         assert!(book.best_ask().is_none());
         assert!(book.last_update_id().is_none());
+    }
+
+    #[test]
+    fn test_high_precision_prices_preserved() {
+        // Test that prices with many decimal places are preserved exactly
+        let mut book = OrderBook::new("BTCUSDT");
+
+        // Use prices that would lose precision in f64 (f64 has ~15-17 significant digits)
+        // These differ in the 20th+ significant digit, beyond f64's precision
+        let precise_bid = dec!(100.1234567890123456789);
+        let precise_ask = dec!(100.1234567890123456790); // Differs in last digit
+
+        let bids = vec![(precise_bid, dec!(1.0))];
+        let asks = vec![(precise_ask, dec!(1.0))];
+        book.apply_snapshot(&bids, &asks, 1000);
+
+        // Both prices should be preserved exactly
+        assert_eq!(book.best_bid().unwrap().price, precise_bid);
+        assert_eq!(book.best_ask().unwrap().price, precise_ask);
+
+        // They should be distinct (not collapsed)
+        assert_ne!(
+            book.best_bid().unwrap().price,
+            book.best_ask().unwrap().price
+        );
+    }
+
+    #[test]
+    fn test_prices_differing_in_low_digits_stay_distinct() {
+        // Prices that would map to same f64 but are distinct Decimals
+        let mut book = OrderBook::new("BTCUSDT");
+
+        let price1 = dec!(0.00000001);
+        let price2 = dec!(0.00000002);
+        let price3 = dec!(0.00000003);
+
+        let bids = vec![
+            (price3, dec!(3.0)),
+            (price2, dec!(2.0)),
+            (price1, dec!(1.0)),
+        ];
+        book.apply_snapshot(&bids, &[], 1000);
+
+        // Should have 3 distinct levels
+        assert_eq!(book.bid_levels(), 3);
+
+        let top = book.top_bids(3);
+        assert_eq!(top[0].price, price3);
+        assert_eq!(top[1].price, price2);
+        assert_eq!(top[2].price, price1);
     }
 }

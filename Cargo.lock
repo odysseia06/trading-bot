@@ -847,20 +847,10 @@ checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 name = "orderbook"
 version = "0.1.0"
 dependencies = [
- "ordered-float",
  "rust_decimal",
  "rust_decimal_macros",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "ordered-float"
-version = "4.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bb71e1b3fa6ca1c61f383464aaf2bb0e2f8e772a1f01d486832464de363b951"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
