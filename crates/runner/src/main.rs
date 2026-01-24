@@ -164,6 +164,7 @@ async fn main() {
             order_id_prefix: "bot".to_string(),
             live_trading: false, // Dry run by default
         },
+        stale_order_timeout_ms: 300_000, // 5 minutes
     };
 
     let mut strategy_runner = StrategyRunner::new(strategy_config);

@@ -23,12 +23,17 @@ use crate::timer::TimerManager;
 pub struct StrategyRunnerConfig {
     /// Signal processor configuration.
     pub signal_processor: SignalProcessorConfig,
+    /// Timeout for stale pending orders (in milliseconds).
+    /// Orders in the pending registry older than this will be cleaned up.
+    /// Default: 5 minutes (300,000 ms).
+    pub stale_order_timeout_ms: i64,
 }
 
 impl Default for StrategyRunnerConfig {
     fn default() -> Self {
         Self {
             signal_processor: SignalProcessorConfig::default(),
+            stale_order_timeout_ms: 300_000, // 5 minutes
         }
     }
 }
@@ -38,6 +43,8 @@ impl Default for StrategyRunnerConfig {
 /// It receives market events and execution reports, dispatches them to
 /// registered strategies, and processes generated signals.
 pub struct StrategyRunner {
+    /// Runner configuration.
+    config: StrategyRunnerConfig,
     /// Registered strategies.
     strategies: Vec<BoxedStrategy>,
     /// Signal processor for validation and rate limiting.
@@ -50,18 +57,22 @@ pub struct StrategyRunner {
     rest_client: Option<Arc<BinanceRestClient>>,
     /// Pending order registry for correlation.
     pending_orders: Option<SharedPendingOrderRegistry>,
+    /// Last time stale orders were cleaned up.
+    last_stale_cleanup_ms: i64,
 }
 
 impl StrategyRunner {
     /// Create a new strategy runner with the given configuration.
     pub fn new(config: StrategyRunnerConfig) -> Self {
         Self {
+            signal_processor: SignalProcessor::new(config.signal_processor.clone()),
+            config,
             strategies: Vec::new(),
-            signal_processor: SignalProcessor::new(config.signal_processor),
             timer_manager: TimerManager::new(),
             market_state: create_market_state(),
             rest_client: None,
             pending_orders: None,
+            last_stale_cleanup_ms: 0,
         }
     }
 
@@ -251,6 +262,17 @@ impl StrategyRunner {
             "received execution report"
         );
 
+        // Clean up pending order registry when order reaches terminal state
+        if report.order_status.is_terminal() {
+            if let Some(ref pending) = self.pending_orders {
+                pending.remove(&report.client_order_id);
+                debug!(
+                    client_order_id = %report.client_order_id,
+                    "removed completed order from pending registry"
+                );
+            }
+        }
+
         let ctx = self.make_context();
 
         // Collect signals first to avoid borrow issues
@@ -282,6 +304,13 @@ impl StrategyRunner {
 
     /// Handle timer callbacks.
     async fn handle_timers(&mut self) -> Result<(), RunnerError> {
+        // Periodically clean up stale pending orders (every minute)
+        let now = chrono_timestamp_ms();
+        if now - self.last_stale_cleanup_ms > 60_000 {
+            self.cleanup_stale_orders(now);
+            self.last_stale_cleanup_ms = now;
+        }
+
         let due_strategies = self.timer_manager.check_due();
 
         if due_strategies.is_empty() {
@@ -482,6 +511,22 @@ impl StrategyRunner {
             MarketEvent::Trade(trade) => {
                 self.market_state
                     .update_last_price(&trade.symbol, trade.price);
+            }
+        }
+    }
+
+    /// Clean up stale pending orders to prevent memory leaks.
+    fn cleanup_stale_orders(&self, current_time_ms: i64) {
+        if let Some(ref pending) = self.pending_orders {
+            let before = pending.len();
+            pending.cleanup_stale(self.config.stale_order_timeout_ms, current_time_ms);
+            let after = pending.len();
+            if before != after {
+                info!(
+                    removed = before - after,
+                    remaining = after,
+                    "cleaned up stale pending orders"
+                );
             }
         }
     }
