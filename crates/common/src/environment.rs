@@ -28,7 +28,7 @@ impl BinanceEnvironment {
     pub fn ws_base_url(&self) -> &'static str {
         match self {
             Self::Production => "wss://stream.binance.com:9443",
-            Self::Testnet => "wss://testnet.binance.vision",
+            Self::Testnet => "wss://stream.testnet.binance.vision:9443",
         }
     }
 
@@ -107,7 +107,10 @@ mod tests {
     fn test_testnet_urls() {
         let env = BinanceEnvironment::Testnet;
         assert_eq!(env.rest_base_url(), "https://testnet.binance.vision");
-        assert_eq!(env.ws_base_url(), "wss://testnet.binance.vision");
+        assert_eq!(
+            env.ws_base_url(),
+            "wss://stream.testnet.binance.vision:9443"
+        );
         assert!(!env.is_production());
         assert!(env.is_testnet());
     }

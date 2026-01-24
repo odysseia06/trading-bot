@@ -341,7 +341,10 @@ mod tests {
     fn test_build_stream_url_single_testnet() {
         let symbols = vec!["BTCUSDT".to_string()];
         let url = build_stream_url(&symbols, BinanceEnvironment::Testnet);
-        assert_eq!(url, "wss://testnet.binance.vision/ws/btcusdt@trade");
+        assert_eq!(
+            url,
+            "wss://stream.testnet.binance.vision:9443/ws/btcusdt@trade"
+        );
     }
 
     #[test]
@@ -350,7 +353,7 @@ mod tests {
         let url = build_stream_url(&symbols, BinanceEnvironment::Testnet);
         assert_eq!(
             url,
-            "wss://testnet.binance.vision/stream?streams=btcusdt@trade/ethusdt@trade"
+            "wss://stream.testnet.binance.vision:9443/stream?streams=btcusdt@trade/ethusdt@trade"
         );
     }
 }
