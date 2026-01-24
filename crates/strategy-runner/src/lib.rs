@@ -40,11 +40,15 @@
 
 mod error;
 pub mod examples;
+mod risk_config;
+mod risk_manager;
 mod runner;
 mod signal_processor;
 mod timer;
 
-pub use error::{RunnerError, SignalError};
+pub use error::{RiskRejection, RunnerError, SignalError};
+pub use risk_config::RiskConfig;
+pub use risk_manager::{RiskAction, RiskCheckResult, RiskManager, RiskStatus};
 pub use runner::{StrategyRunner, StrategyRunnerConfig};
 pub use signal_processor::{ProcessedSignal, SignalProcessor, SignalProcessorConfig};
 pub use timer::TimerManager;

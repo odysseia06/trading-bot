@@ -24,6 +24,7 @@
 mod correlation;
 mod execution;
 mod order;
+mod position;
 
 pub use correlation::{
     create_pending_order_registry, generate_client_order_id, PendingOrderRegistry,
@@ -31,3 +32,4 @@ pub use correlation::{
 };
 pub use execution::ExecutionReport;
 pub use order::{Order, OrderSide, OrderStatus, OrderType, TimeInForce};
+pub use position::{create_position_tracker, Position, PositionTracker, SharedPositionTracker};

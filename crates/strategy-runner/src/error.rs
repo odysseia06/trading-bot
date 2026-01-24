@@ -1,5 +1,6 @@
 //! Strategy runner error types.
 
+use rust_decimal::Decimal;
 use thiserror::Error;
 
 /// Errors that can occur during strategy runner execution.
@@ -52,4 +53,90 @@ pub enum SignalError {
     /// Order ID generation failed.
     #[error("failed to generate order ID")]
     OrderIdGeneration,
+
+    /// Risk check rejected the order.
+    #[error("risk rejected: {0}")]
+    RiskRejected(#[from] RiskRejection),
+}
+
+/// Reasons why a risk check rejected an order.
+#[derive(Debug, Clone, Error)]
+pub enum RiskRejection {
+    /// Kill switch is active - all trading halted.
+    #[error("kill switch is active")]
+    KillSwitchActive,
+
+    /// Circuit breaker is active after a loss event.
+    #[error("circuit breaker active, resumes at {resumes_at_ms}")]
+    CircuitBreakerActive {
+        /// Timestamp (ms) when trading can resume.
+        resumes_at_ms: i64,
+    },
+
+    /// Daily loss limit has been exceeded.
+    #[error("daily loss limit exceeded: current {current}, limit {limit}")]
+    DailyLossLimitExceeded {
+        /// Current daily loss (negative value).
+        current: Decimal,
+        /// Maximum allowed daily loss.
+        limit: Decimal,
+    },
+
+    /// Drawdown limit has been exceeded.
+    #[error("drawdown limit exceeded: current {current_pct}%, limit {limit_pct}%")]
+    DrawdownLimitExceeded {
+        /// Current drawdown percentage.
+        current_pct: Decimal,
+        /// Maximum allowed drawdown percentage.
+        limit_pct: Decimal,
+    },
+
+    /// Position limit for a symbol would be exceeded.
+    #[error("position limit exceeded for {symbol}: current {current}, limit {limit}")]
+    PositionLimitExceeded {
+        /// Trading pair symbol.
+        symbol: String,
+        /// Current position notional.
+        current: Decimal,
+        /// Maximum allowed position notional.
+        limit: Decimal,
+    },
+
+    /// Total exposure limit would be exceeded.
+    #[error("total exposure limit exceeded: current {current}, limit {limit}")]
+    TotalExposureLimitExceeded {
+        /// Current total exposure.
+        current: Decimal,
+        /// Maximum allowed total exposure.
+        limit: Decimal,
+    },
+
+    /// Too many open orders for a symbol.
+    #[error("too many open orders for {symbol}: current {current}, limit {limit}")]
+    TooManyOpenOrdersPerSymbol {
+        /// Trading pair symbol.
+        symbol: String,
+        /// Current number of open orders.
+        current: u32,
+        /// Maximum allowed open orders.
+        limit: u32,
+    },
+
+    /// Too many open orders total.
+    #[error("too many open orders total: current {current}, limit {limit}")]
+    TooManyOpenOrdersTotal {
+        /// Current total number of open orders.
+        current: u32,
+        /// Maximum allowed total open orders.
+        limit: u32,
+    },
+
+    /// Single order is too large.
+    #[error("order too large: notional {notional}, limit {limit}")]
+    OrderTooLarge {
+        /// Order notional value.
+        notional: Decimal,
+        /// Maximum allowed order notional.
+        limit: Decimal,
+    },
 }

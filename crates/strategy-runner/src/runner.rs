@@ -1,20 +1,24 @@
 //! Strategy runner - main execution loop.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::RwLock;
+use rust_decimal::Decimal;
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use binance_rest::BinanceRestClient;
 use connector_core::EventReceiver;
-use execution_core::{ExecutionReport, SharedPendingOrderRegistry};
+use execution_core::{ExecutionReport, SharedPendingOrderRegistry, SharedPositionTracker};
 use model::MarketEvent;
 use strategy_core::{
     create_market_state, BoxedStrategy, SharedMarketState, Signal, SignalKind, StrategyContext,
 };
 
 use crate::error::RunnerError;
+use crate::risk_manager::{RiskAction, RiskCheckResult, RiskManager};
 use crate::signal_processor::{SignalProcessor, SignalProcessorConfig};
 use crate::timer::TimerManager;
 
@@ -57,6 +61,12 @@ pub struct StrategyRunner {
     rest_client: Option<Arc<BinanceRestClient>>,
     /// Pending order registry for correlation.
     pending_orders: Option<SharedPendingOrderRegistry>,
+    /// Position tracker for risk management.
+    position_tracker: Option<SharedPositionTracker>,
+    /// Risk manager for pre-trade checks (wrapped in Arc for shared access).
+    risk_manager: Option<Arc<RiskManager>>,
+    /// Current prices by symbol (for risk calculations).
+    current_prices: Arc<RwLock<HashMap<String, Decimal>>>,
     /// Last time stale orders were cleaned up.
     last_stale_cleanup_ms: i64,
 }
@@ -72,6 +82,9 @@ impl StrategyRunner {
             market_state: create_market_state(),
             rest_client: None,
             pending_orders: None,
+            position_tracker: None,
+            risk_manager: None,
+            current_prices: Arc::new(RwLock::new(HashMap::new())),
             last_stale_cleanup_ms: 0,
         }
     }
@@ -85,6 +98,18 @@ impl StrategyRunner {
     /// Set the pending order registry for order correlation.
     pub fn with_pending_orders(mut self, registry: SharedPendingOrderRegistry) -> Self {
         self.pending_orders = Some(registry);
+        self
+    }
+
+    /// Set the position tracker for tracking fills.
+    pub fn with_position_tracker(mut self, tracker: SharedPositionTracker) -> Self {
+        self.position_tracker = Some(tracker);
+        self
+    }
+
+    /// Set the risk manager for pre-trade checks.
+    pub fn with_risk_manager(mut self, manager: Arc<RiskManager>) -> Self {
+        self.risk_manager = Some(manager);
         self
     }
 
@@ -209,6 +234,18 @@ impl StrategyRunner {
 
     /// Handle a market event.
     async fn handle_market_event(&mut self, event: MarketEvent) -> Result<(), RunnerError> {
+        // Log the trade
+        if let MarketEvent::Trade(ref trade) = event {
+            trace!(
+                id = trade.trade_id,
+                symbol = %trade.symbol,
+                price = %trade.price,
+                qty = %trade.qty,
+                side = ?trade.maker_side,
+                "trade"
+            );
+        }
+
         // Update market state
         self.update_market_state(&event);
 
@@ -262,6 +299,16 @@ impl StrategyRunner {
             "received execution report"
         );
 
+        // Update position tracker with fill information
+        if let Some(ref tracker) = self.position_tracker {
+            tracker.update_from_fill(&report);
+        }
+
+        // Update risk manager with fill information
+        if let Some(ref risk_manager) = self.risk_manager {
+            risk_manager.on_fill(&report);
+        }
+
         // Clean up pending order registry when order reaches terminal state
         if report.order_status.is_terminal() {
             if let Some(ref pending) = self.pending_orders {
@@ -311,6 +358,14 @@ impl StrategyRunner {
             self.last_stale_cleanup_ms = now;
         }
 
+        // Periodic risk checks
+        if let Some(ref risk_manager) = self.risk_manager {
+            let prices = self.current_prices.read().clone();
+            if let Some(action) = risk_manager.periodic_check(&prices, now) {
+                self.handle_risk_action(action).await;
+            }
+        }
+
         let due_strategies = self.timer_manager.check_due();
 
         if due_strategies.is_empty() {
@@ -357,20 +412,70 @@ impl StrategyRunner {
         // Set timestamp
         signal.generated_at_ms = chrono_timestamp_ms();
 
-        // Process through signal processor
+        // Process through signal processor (rate limits, basic validation)
         let processed = match self.signal_processor.process(signal) {
             Ok(p) => p,
             Err(e) => {
-                warn!(error = %e, "signal rejected");
+                warn!(error = %e, "signal rejected by processor");
                 return;
             }
         };
+
+        // Risk check for order signals
+        if let SignalKind::Order(ref intent) = processed.signal.kind {
+            if let Some(ref risk_manager) = self.risk_manager {
+                // Get current price for the symbol
+                let current_price = self
+                    .current_prices
+                    .read()
+                    .get(&intent.symbol)
+                    .copied()
+                    .or(intent.price)
+                    .unwrap_or(Decimal::ZERO);
+
+                match risk_manager.check_order(intent, current_price) {
+                    RiskCheckResult::Approved => {
+                        debug!(
+                            symbol = %intent.symbol,
+                            "order approved by risk manager"
+                        );
+                    }
+                    RiskCheckResult::Rejected(reason) => {
+                        warn!(
+                            symbol = %intent.symbol,
+                            reason = %reason,
+                            "order rejected by risk manager"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
 
         // Execute signal
         if self.signal_processor.is_live() {
             self.execute_signal_live(processed).await;
         } else {
             self.execute_signal_dry(processed);
+        }
+    }
+
+    /// Handle a risk action from the risk manager.
+    async fn handle_risk_action(&self, action: RiskAction) {
+        match action {
+            RiskAction::TriggerCircuitBreaker => {
+                warn!("circuit breaker triggered - trading paused");
+                // The circuit breaker state is already set in the risk manager.
+                // New orders will be rejected until it clears.
+            }
+            RiskAction::CancelAllOrders => {
+                warn!("risk action: canceling all open orders");
+                // TODO: Implement cancel all orders when we have order tracking
+            }
+            RiskAction::CloseAllPositions => {
+                warn!("risk action: closing all positions");
+                // TODO: Implement close all positions when we have position management
+            }
         }
     }
 
@@ -511,8 +616,14 @@ impl StrategyRunner {
     fn update_market_state(&self, event: &MarketEvent) {
         match event {
             MarketEvent::Trade(trade) => {
+                // Update shared market state
                 self.market_state
                     .update_last_price(&trade.symbol, trade.price);
+
+                // Update current prices for risk calculations
+                self.current_prices
+                    .write()
+                    .insert(trade.symbol.clone(), trade.price);
             }
         }
     }

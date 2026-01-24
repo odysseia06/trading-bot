@@ -5,8 +5,10 @@ edition = "2021"
 
 [dependencies]
 async-trait = { workspace = true }
+chrono = { workspace = true }
 parking_lot = { workspace = true }
 rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -25,14 +25,14 @@ use binance_rest::BinanceRestClient;
 use common::BinanceEnvironment;
 use connector_binance::{run_connector, run_user_data_stream, AccountUpdate};
 use connector_core::{create_event_channel, ConnectorConfig};
-use execution_core::{create_pending_order_registry, ExecutionReport};
+use execution_core::{create_pending_order_registry, create_position_tracker, ExecutionReport};
 use metrics::create_metrics;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 use std::time::Duration;
 use strategy_runner::{
     examples::{PriceThresholdConfig, PriceThresholdStrategy},
-    SignalProcessorConfig, StrategyRunner, StrategyRunnerConfig,
+    RiskConfig, RiskManager, SignalProcessorConfig, StrategyRunner, StrategyRunnerConfig,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
@@ -44,9 +44,10 @@ fn print_usage() {
     eprintln!("Usage: trading-bot [OPTIONS] [SYMBOLS...]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --testnet     Use Binance testnet (fake money)");
-    eprintln!("  --live        Enable live trading (requires API keys)");
-    eprintln!("  --help        Show this help message");
+    eprintln!("  --testnet, -t      Use Binance testnet (fake money)");
+    eprintln!("  --production, -p   Use Binance production (overrides .env)");
+    eprintln!("  --live, -l         Enable live trading (requires API keys)");
+    eprintln!("  --help, -h         Show this help message");
     eprintln!();
     eprintln!("Environment variables:");
     eprintln!("  BINANCE_API_KEY       API key for authenticated requests");
@@ -58,6 +59,7 @@ fn print_usage() {
     eprintln!("  trading-bot ETHUSDT BNBUSDT       # Stream multiple symbols");
     eprintln!("  trading-bot --testnet BTCUSDT     # Use testnet");
     eprintln!("  trading-bot --testnet --live      # Live trading on testnet");
+    eprintln!("  trading-bot -p                    # Force production (ignores .env)");
 }
 
 #[tokio::main]
@@ -75,12 +77,14 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut use_testnet = false;
+    let mut use_production = false;
     let mut live_trading = false;
     let mut symbols = Vec::new();
 
     for arg in &args {
         match arg.as_str() {
             "--testnet" | "-t" => use_testnet = true,
+            "--production" | "--prod" | "-p" => use_production = true,
             "--live" | "-l" => live_trading = true,
             "--help" | "-h" => {
                 print_usage();
@@ -98,6 +102,8 @@ async fn main() {
     // Determine environment: CLI flag takes precedence, then env var, then default
     let environment = if use_testnet {
         BinanceEnvironment::Testnet
+    } else if use_production {
+        BinanceEnvironment::Production
     } else {
         BinanceEnvironment::from_env()
     };
@@ -260,6 +266,44 @@ async fn main() {
     };
 
     let mut strategy_runner = StrategyRunner::new(strategy_config);
+
+    // Create position tracker and risk manager
+    let position_tracker = create_position_tracker();
+
+    // Configure risk limits based on environment
+    let risk_config = if environment.is_production() {
+        // Conservative limits for production
+        RiskConfig::new()
+            .with_max_daily_loss(dec!(100)) // Stop at $100 daily loss
+            .with_max_position_notional(dec!(1000)) // $1k max per symbol
+            .with_max_total_exposure(dec!(5000)) // $5k total exposure
+            .with_max_order_notional(dec!(500)) // $500 max per order
+    } else {
+        // More relaxed for testnet (fake money)
+        RiskConfig::new()
+            .with_max_daily_loss(dec!(1000)) // Stop at $1000 daily loss
+            .with_max_position_notional(dec!(10000)) // $10k max per symbol
+            .with_max_total_exposure(dec!(50000)) // $50k total exposure
+            .with_max_order_notional(dec!(5000)) // $5k max per order
+    };
+
+    let risk_manager = Arc::new(RiskManager::new(
+        risk_config.clone(),
+        position_tracker.clone(),
+        pending_orders.clone(),
+    ));
+
+    info!(
+        max_daily_loss = %risk_config.max_daily_loss,
+        max_position = %risk_config.max_position_notional,
+        max_exposure = %risk_config.max_total_exposure,
+        "Risk management configured"
+    );
+
+    // Wire up the strategy runner with all components
+    strategy_runner = strategy_runner
+        .with_position_tracker(position_tracker)
+        .with_risk_manager(risk_manager);
 
     // Optionally add REST client for live trading
     if let Some(ref client) = rest_client {
