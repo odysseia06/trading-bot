@@ -435,6 +435,7 @@ impl StrategyRunner {
                     order_type = ?intent.order_type,
                     quantity = %intent.quantity,
                     price = ?intent.price,
+                    stop_price = ?intent.stop_price,
                     "placing order"
                 );
 
@@ -445,6 +446,7 @@ impl StrategyRunner {
                         intent.order_type,
                         intent.quantity,
                         intent.price,
+                        intent.stop_price,
                         intent.time_in_force,
                         client_order_id,
                     )

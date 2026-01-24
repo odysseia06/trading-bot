@@ -1,7 +1,9 @@
 //! Binance REST API client.
 
 use crate::error::BinanceRestError;
-use crate::responses::{ListenKeyResponse, NewOrderResponse, OrderQueryResponse, ServerTimeResponse};
+use crate::responses::{
+    ListenKeyResponse, NewOrderResponse, OrderQueryResponse, ServerTimeResponse,
+};
 use auth::{ApiCredentials, RequestSigner};
 use execution_core::{OrderSide, OrderType, TimeInForce};
 use rest_client::RestClient;
@@ -161,6 +163,16 @@ impl BinanceRestClient {
     /// Place a new order.
     ///
     /// POST /api/v3/order
+    ///
+    /// # Parameters
+    /// - `symbol`: Trading pair (e.g., "BTCUSDT")
+    /// - `side`: Buy or Sell
+    /// - `order_type`: Market, Limit, StopLoss, StopLossLimit, TakeProfit, TakeProfitLimit, LimitMaker
+    /// - `quantity`: Order quantity
+    /// - `price`: Limit price (required for Limit, StopLossLimit, TakeProfitLimit, LimitMaker)
+    /// - `stop_price`: Trigger price (required for StopLoss, StopLossLimit, TakeProfit, TakeProfitLimit)
+    /// - `time_in_force`: GTC, IOC, FOK (required for Limit orders)
+    /// - `client_order_id`: Custom order ID for tracking
     pub async fn place_order(
         &self,
         symbol: &str,
@@ -168,6 +180,7 @@ impl BinanceRestClient {
         order_type: OrderType,
         quantity: Decimal,
         price: Option<Decimal>,
+        stop_price: Option<Decimal>,
         time_in_force: Option<TimeInForce>,
         client_order_id: &str,
     ) -> Result<NewOrderResponse, BinanceRestError> {
@@ -184,15 +197,16 @@ impl BinanceRestClient {
             params.push(("price", p.to_string()));
         }
 
+        if let Some(sp) = stop_price {
+            params.push(("stopPrice", sp.to_string()));
+        }
+
         if let Some(tif) = time_in_force {
             params.push(("timeInForce", tif.as_binance_str().to_string()));
         }
 
         // Convert to slice of references for signer
-        let param_refs: Vec<(&str, &str)> = params
-            .iter()
-            .map(|(k, v)| (*k, v.as_str()))
-            .collect();
+        let param_refs: Vec<(&str, &str)> = params.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
         let signer = RequestSigner::new(&self.credentials);
         let timestamp = self.server_timestamp_ms();
@@ -231,10 +245,7 @@ impl BinanceRestClient {
         symbol: &str,
         order_id: u64,
     ) -> Result<OrderQueryResponse, BinanceRestError> {
-        let params = [
-            ("symbol", symbol),
-            ("orderId", &order_id.to_string()),
-        ];
+        let params = [("symbol", symbol), ("orderId", &order_id.to_string())];
 
         self.query_order_internal(&params).await
     }
@@ -247,10 +258,7 @@ impl BinanceRestClient {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<OrderQueryResponse, BinanceRestError> {
-        let params = [
-            ("symbol", symbol),
-            ("origClientOrderId", client_order_id),
-        ];
+        let params = [("symbol", symbol), ("origClientOrderId", client_order_id)];
 
         self.query_order_internal(&params).await
     }
@@ -282,10 +290,7 @@ impl BinanceRestClient {
         symbol: &str,
         order_id: u64,
     ) -> Result<OrderQueryResponse, BinanceRestError> {
-        let params = [
-            ("symbol", symbol),
-            ("orderId", &order_id.to_string()),
-        ];
+        let params = [("symbol", symbol), ("orderId", &order_id.to_string())];
 
         self.cancel_order_internal(&params).await
     }
@@ -298,10 +303,7 @@ impl BinanceRestClient {
         symbol: &str,
         client_order_id: &str,
     ) -> Result<OrderQueryResponse, BinanceRestError> {
-        let params = [
-            ("symbol", symbol),
-            ("origClientOrderId", client_order_id),
-        ];
+        let params = [("symbol", symbol), ("origClientOrderId", client_order_id)];
 
         self.cancel_order_internal(&params).await
     }
@@ -342,7 +344,10 @@ impl std::fmt::Debug for BinanceRestClient {
         f.debug_struct("BinanceRestClient")
             .field("base_url", &BINANCE_REST_BASE)
             .field("api_key", &self.credentials.api_key())
-            .field("time_offset_ms", &self.time_offset_ms.load(Ordering::Relaxed))
+            .field(
+                "time_offset_ms",
+                &self.time_offset_ms.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
