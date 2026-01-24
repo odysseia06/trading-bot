@@ -1,0 +1,20 @@
+[package]
+name = "strategy-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+rust_decimal = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Internal crates
+model = { workspace = true }
+orderbook = { workspace = true }
+execution-core = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -1,10 +1,27 @@
-use connector_binance::run_connector;
+//! Market connector runner.
+//!
+//! This is the main entry point for the trading bot. It:
+//! - Connects to Binance market data stream (public)
+//! - Optionally connects to user data stream (requires API keys)
+//! - Runs the strategy engine with registered strategies
+//! - Handles graceful shutdown on Ctrl+C
+//! - Reports health metrics periodically
+
+use auth::ApiCredentials;
+use binance_rest::BinanceRestClient;
+use connector_binance::{run_connector, run_user_data_stream, AccountUpdate};
 use connector_core::{create_event_channel, ConnectorConfig};
+use execution_core::{create_pending_order_registry, ExecutionReport};
 use metrics::create_metrics;
-use model::MarketEvent;
+use rust_decimal_macros::dec;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
-use tracing::info;
+use strategy_runner::{
+    examples::{PriceThresholdConfig, PriceThresholdStrategy},
+    SignalProcessorConfig, StrategyRunner, StrategyRunnerConfig,
+};
+use tokio::sync::{mpsc, watch};
+use tracing::{error, info, warn};
 
 /// Interval for periodic health status logging.
 const HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -12,6 +29,21 @@ const HEALTH_LOG_INTERVAL: Duration = Duration::from_secs(60);
 #[tokio::main]
 async fn main() {
     common::init_logging();
+
+    // Try to load API credentials from environment
+    let credentials = match ApiCredentials::from_env() {
+        Ok(creds) => {
+            info!(api_key = %creds.api_key(), "Loaded API credentials");
+            Some(creds)
+        }
+        Err(e) => {
+            info!(
+                reason = %e,
+                "No API credentials found, running in read-only mode (market data only)"
+            );
+            None
+        }
+    };
 
     let symbols = std::env::args().skip(1).collect::<Vec<_>>();
 
@@ -21,26 +53,159 @@ async fn main() {
         symbols
     };
 
-    info!(symbols = ?symbols, "Starting market connector");
+    info!(symbols = ?symbols, "Starting trading bot");
 
     let config = ConnectorConfig {
-        symbols,
+        symbols: symbols.clone(),
         channel_capacity: 1024,
     };
 
-    let (sender, mut receiver) = create_event_channel(config.channel_capacity);
+    let (sender, receiver) = create_event_channel(config.channel_capacity);
 
-    // Create metrics
+    // Create shared resources
     let metrics = create_metrics();
+    let pending_orders = create_pending_order_registry();
 
     // Create shutdown signal channel
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    // Spawn connector task
+    // Create channel for execution reports to strategy runner
+    let (execution_tx, execution_rx) = mpsc::channel::<ExecutionReport>(256);
+
+    // Spawn market data connector task
     let connector_metrics = metrics.clone();
+    let market_shutdown_rx = shutdown_rx.clone();
     let connector_handle = tokio::spawn(async move {
-        if let Err(e) = run_connector(config, sender, shutdown_rx, connector_metrics).await {
-            tracing::error!(error = %e, "Connector error");
+        if let Err(e) = run_connector(config, sender, market_shutdown_rx, connector_metrics).await {
+            error!(error = %e, "Market connector error");
+        }
+    });
+
+    // Spawn user data stream task (if credentials available)
+    let rest_client: Option<Arc<BinanceRestClient>> = if let Some(ref creds) = credentials {
+        match BinanceRestClient::new(creds.clone()) {
+            Ok(client) => {
+                let client = Arc::new(client);
+                // Sync time with Binance server
+                if let Err(e) = client.sync_time().await {
+                    warn!(error = %e, "Failed to sync server time, timestamps may be rejected");
+                }
+                Some(client)
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to create REST client");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let user_data_handle = if let Some(ref client) = rest_client {
+        let user_metrics = metrics.clone();
+        let user_shutdown_rx = shutdown_rx.clone();
+        let user_pending_orders = pending_orders.clone();
+        let client = Arc::clone(client);
+        let execution_tx = execution_tx.clone();
+
+        // Create callbacks for execution reports and account updates
+        let on_execution_report: Box<dyn Fn(ExecutionReport) + Send + Sync> =
+            Box::new(move |report| {
+                info!(
+                    symbol = %report.symbol,
+                    client_order_id = %report.client_order_id,
+                    status = ?report.order_status,
+                    filled_qty = %report.cumulative_filled_qty,
+                    "Execution report"
+                );
+                // Forward to strategy runner
+                let _ = execution_tx.try_send(report);
+            });
+
+        let on_account_update: Box<dyn Fn(AccountUpdate) + Send + Sync> = Box::new(move |update| {
+            for balance in &update.balances {
+                if balance.free > rust_decimal::Decimal::ZERO
+                    || balance.locked > rust_decimal::Decimal::ZERO
+                {
+                    info!(
+                        asset = %balance.asset,
+                        free = %balance.free,
+                        locked = %balance.locked,
+                        "Balance update"
+                    );
+                }
+            }
+        });
+
+        Some(tokio::spawn(async move {
+            if let Err(e) = run_user_data_stream(
+                client,
+                on_execution_report,
+                on_account_update,
+                user_shutdown_rx,
+                user_metrics,
+                user_pending_orders,
+            )
+            .await
+            {
+                error!(error = %e, "User data stream error");
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Create and configure strategy runner
+    let strategy_config = StrategyRunnerConfig {
+        signal_processor: SignalProcessorConfig {
+            max_orders_per_second: 5,
+            min_order_notional: dec!(10),
+            max_order_notional: dec!(100000),
+            order_id_prefix: "bot".to_string(),
+            live_trading: false, // Dry run by default
+        },
+    };
+
+    let mut strategy_runner = StrategyRunner::new(strategy_config);
+
+    // Optionally add REST client for live trading
+    if let Some(ref client) = rest_client {
+        strategy_runner = strategy_runner
+            .with_rest_client(Arc::clone(client))
+            .with_pending_orders(pending_orders.clone());
+    }
+
+    // Register example strategy (price threshold for first symbol)
+    let primary_symbol = symbols
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "BTCUSDT".to_string());
+    let price_threshold_config = PriceThresholdConfig {
+        symbol: primary_symbol.clone(),
+        buy_threshold: dec!(90000),   // Buy below $90,000
+        sell_threshold: dec!(100000), // Sell above $100,000
+        quantity: dec!(0.001),
+        cooldown_ms: 60_000, // 1 minute cooldown between signals
+    };
+
+    let strategy = PriceThresholdStrategy::new("price_threshold_1", price_threshold_config);
+    strategy_runner.register_strategy(Box::new(strategy));
+
+    info!(
+        symbol = %primary_symbol,
+        buy_threshold = 90000,
+        sell_threshold = 100000,
+        "Registered price threshold strategy (DRY RUN mode)"
+    );
+
+    // Spawn strategy runner task
+    let strategy_shutdown_rx = shutdown_rx.clone();
+    let strategy_handle = tokio::spawn(async move {
+        if let Err(e) = strategy_runner
+            .run(receiver, execution_rx, strategy_shutdown_rx)
+            .await
+        {
+            error!(error = %e, "Strategy runner error");
         }
     });
 
@@ -83,22 +248,20 @@ async fn main() {
         }
     });
 
-    // Print trades as they arrive
-    while let Some(event) = receiver.recv().await {
-        match event {
-            MarketEvent::Trade(trade) => {
-                println!(
-                    "{} | {} | price: {} | qty: {} | side: {:?}",
-                    trade.timestamp_ms, trade.symbol, trade.price, trade.qty, trade.maker_side
-                );
-            }
-        }
-    }
+    info!("Trading bot running. Press Ctrl+C to stop.");
 
-    info!("Event channel closed, waiting for connector to finish");
+    // Wait for strategy runner to finish (it owns the market event receiver)
+    let _ = strategy_handle.await;
+
+    info!("Strategy runner stopped, waiting for other tasks");
 
     // Wait for connector to finish
     let _ = connector_handle.await;
+
+    // Wait for user data stream to finish (if running)
+    if let Some(handle) = user_data_handle {
+        let _ = handle.await;
+    }
 
     // Print final metrics
     let snapshot = metrics.snapshot();

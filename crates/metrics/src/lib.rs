@@ -13,6 +13,7 @@ pub struct ConnectorMetrics {
     websocket_errors: AtomicU64,
     reconnect_attempts: AtomicU64,
     reconnect_successes: AtomicU64,
+    connection_failures: AtomicU64,
 
     // Timestamps
     inner: RwLock<MetricsInner>,
@@ -41,6 +42,7 @@ impl ConnectorMetrics {
             websocket_errors: AtomicU64::new(0),
             reconnect_attempts: AtomicU64::new(0),
             reconnect_successes: AtomicU64::new(0),
+            connection_failures: AtomicU64::new(0),
             inner: RwLock::new(MetricsInner {
                 start_time: Instant::now(),
                 last_trade_time: None,
@@ -80,6 +82,11 @@ impl ConnectorMetrics {
         self.reconnect_successes.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_connection_failures(&self) {
+        self.connection_failures.fetch_add(1, Ordering::Relaxed);
+        self.inner.write().last_error_time = Some(Instant::now());
+    }
+
     // --- Getter methods ---
 
     pub fn trades_received(&self) -> u64 {
@@ -104,6 +111,10 @@ impl ConnectorMetrics {
 
     pub fn reconnect_successes(&self) -> u64 {
         self.reconnect_successes.load(Ordering::Relaxed)
+    }
+
+    pub fn connection_failures(&self) -> u64 {
+        self.connection_failures.load(Ordering::Relaxed)
     }
 
     pub fn uptime_secs(&self) -> f64 {
@@ -143,6 +154,7 @@ impl ConnectorMetrics {
             websocket_errors: self.websocket_errors(),
             reconnect_attempts: self.reconnect_attempts(),
             reconnect_successes: self.reconnect_successes(),
+            connection_failures: self.connection_failures(),
             uptime_secs: self.uptime_secs(),
             trades_per_second: self.trades_per_second(),
             secs_since_last_trade: self.secs_since_last_trade(),
@@ -160,6 +172,7 @@ pub struct MetricsSnapshot {
     pub websocket_errors: u64,
     pub reconnect_attempts: u64,
     pub reconnect_successes: u64,
+    pub connection_failures: u64,
     pub uptime_secs: f64,
     pub trades_per_second: f64,
     pub secs_since_last_trade: Option<f64>,
@@ -229,6 +242,7 @@ impl std::fmt::Display for MetricsSnapshot {
         writeln!(f, "Trades/sec:          {:.2}", self.trades_per_second)?;
         writeln!(f, "Parse errors:        {}", self.parse_errors)?;
         writeln!(f, "WebSocket errors:    {}", self.websocket_errors)?;
+        writeln!(f, "Connection failures: {}", self.connection_failures)?;
         writeln!(f, "Reconnect attempts:  {}", self.reconnect_attempts)?;
         writeln!(f, "Reconnect successes: {}", self.reconnect_successes)?;
         if let Some(secs) = self.secs_since_last_trade {
@@ -303,6 +317,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(5.0), // Recent trade
@@ -322,6 +337,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 10.0, // Short uptime
             trades_per_second: 0.0,
             secs_since_last_trade: None, // No trades yet
@@ -340,6 +356,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(45.0), // Between 30s and 60s
@@ -359,6 +376,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 45.0, // Between thresholds
             trades_per_second: 0.0,
             secs_since_last_trade: None,
@@ -377,6 +395,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 300.0,
             trades_per_second: 0.33,
             secs_since_last_trade: Some(90.0), // Over 60s
@@ -396,6 +415,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 120.0, // Long uptime
             trades_per_second: 0.0,
             secs_since_last_trade: None, // Never received trades
@@ -415,6 +435,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(30.0), // Exactly at threshold
@@ -435,6 +456,7 @@ mod tests {
             websocket_errors: 0,
             reconnect_attempts: 0,
             reconnect_successes: 0,
+            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(60.0), // Exactly at threshold

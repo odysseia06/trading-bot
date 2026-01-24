@@ -8,6 +8,8 @@ model = { workspace = true }
 connector-core = { workspace = true }
 common = { workspace = true }
 metrics = { workspace = true }
+execution-core = { workspace = true }
+binance-rest = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }

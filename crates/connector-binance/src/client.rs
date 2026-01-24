@@ -226,7 +226,7 @@ pub async fn run_connector(
 ) -> Result<(), ConnectorError> {
     let url = build_stream_url(&config.symbols);
     let mut backoff = ExponentialBackoff::default();
-    let mut needs_reconnect = false; // True after we've connected and then disconnected
+    let mut needs_reconnect = false; // True after we've had at least one connection attempt
 
     loop {
         // Check if shutdown was requested before attempting connection
@@ -242,13 +242,12 @@ pub async fn run_connector(
                 return Ok(());
             }
             SessionResult::Connected { duration, error } => {
-                // We were connected, now we're not - this is a reconnect scenario
+                // We successfully connected - if this was a reconnect, record it immediately
                 if needs_reconnect {
-                    // We successfully reconnected (connected after a previous disconnect)
                     metrics.inc_reconnect_successes();
                 }
 
-                // Now we need to reconnect
+                // Mark that any future connection is a reconnect
                 needs_reconnect = true;
 
                 // Handle channel closed specially - no point reconnecting
@@ -266,6 +265,7 @@ pub async fn run_connector(
                     backoff.reset();
                 }
 
+                // About to attempt reconnection
                 metrics.inc_reconnect_attempts();
 
                 let delay = backoff.next_delay();
@@ -288,10 +288,11 @@ pub async fn run_connector(
                 }
             }
             SessionResult::ConnectFailed(e) => {
-                // Failed to connect at all
-                if needs_reconnect {
-                    metrics.inc_reconnect_attempts();
-                }
+                // Failed to connect - track all connection failures
+                metrics.inc_connection_failures();
+
+                // Mark that any future connection is a reconnect attempt
+                needs_reconnect = true;
 
                 let delay = backoff.next_delay();
                 warn!(

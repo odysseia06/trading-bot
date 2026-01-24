@@ -13,5 +13,12 @@ connector-core = { workspace = true }
 connector-binance = { workspace = true }
 common = { workspace = true }
 metrics = { workspace = true }
+auth = { workspace = true }
+binance-rest = { workspace = true }
+execution-core = { workspace = true }
+strategy-core = { workspace = true }
+strategy-runner = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
