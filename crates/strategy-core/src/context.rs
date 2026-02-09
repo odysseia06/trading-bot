@@ -24,13 +24,59 @@ impl MarketState {
         }
     }
 
-    /// Update or create an order book for a symbol.
-    pub fn update_order_book(&self, symbol: &str, update_fn: impl FnOnce(&mut OrderBook)) {
+    /// Update or create an order book for a symbol using a closure.
+    pub fn update_order_book_with(&self, symbol: &str, update_fn: impl FnOnce(&mut OrderBook)) {
         let mut books = self.order_books.write();
         let book = books
             .entry(symbol.to_string())
             .or_insert_with(|| OrderBook::new(symbol));
         update_fn(book);
+    }
+
+    /// Apply a depth update to the order book for a symbol.
+    ///
+    /// This handles both snapshots and delta updates from a depth stream.
+    /// Returns `true` if the update was applied, `false` if there was a sequence gap.
+    pub fn update_order_book(
+        &self,
+        symbol: &str,
+        bids: &[(Decimal, Decimal)],
+        asks: &[(Decimal, Decimal)],
+        first_update_id: u64,
+        final_update_id: u64,
+        is_snapshot: bool,
+    ) -> bool {
+        let mut books = self.order_books.write();
+        let book = books
+            .entry(symbol.to_string())
+            .or_insert_with(|| OrderBook::new(symbol));
+
+        if is_snapshot {
+            // Apply as full snapshot - replaces the entire book
+            book.apply_snapshot(bids, asks, final_update_id);
+            tracing::info!(
+                symbol = %symbol,
+                last_update_id = final_update_id,
+                bid_levels = bids.len(),
+                ask_levels = asks.len(),
+                "Order book snapshot applied"
+            );
+            true
+        } else {
+            // Apply as delta update
+            match book.apply_delta(bids, asks, first_update_id, final_update_id) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        symbol = %symbol,
+                        error = %e,
+                        "Order book sequence gap, clearing book"
+                    );
+                    book.clear();
+                    false
+                }
+            }
+        }
     }
 
     /// Get a snapshot of the order book for a symbol.
@@ -223,7 +269,7 @@ mod tests {
         assert!(state.order_book("BTCUSDT").is_none());
 
         // Apply a snapshot
-        state.update_order_book("BTCUSDT", |book| {
+        state.update_order_book_with("BTCUSDT", |book| {
             let bids = vec![(dec!(50000), dec!(1.0))];
             let asks = vec![(dec!(50100), dec!(1.0))];
             book.apply_snapshot(&bids, &asks, 1000);
@@ -251,7 +297,7 @@ mod tests {
     fn test_top_levels() {
         let state = MarketState::new();
 
-        state.update_order_book("BTCUSDT", |book| {
+        state.update_order_book_with("BTCUSDT", |book| {
             let bids = vec![
                 (dec!(100), dec!(1)),
                 (dec!(99), dec!(2)),

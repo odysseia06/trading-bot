@@ -47,6 +47,7 @@ fn print_usage() {
     eprintln!("  --testnet, -t      Use Binance testnet (fake money)");
     eprintln!("  --production, -p   Use Binance production (overrides .env)");
     eprintln!("  --live, -l         Enable live trading (requires API keys)");
+    eprintln!("  --depth, -d        Enable order book depth stream");
     eprintln!("  --help, -h         Show this help message");
     eprintln!();
     eprintln!("Environment variables:");
@@ -59,6 +60,7 @@ fn print_usage() {
     eprintln!("  trading-bot ETHUSDT BNBUSDT       # Stream multiple symbols");
     eprintln!("  trading-bot --testnet BTCUSDT     # Use testnet");
     eprintln!("  trading-bot --testnet --live      # Live trading on testnet");
+    eprintln!("  trading-bot --depth BTCUSDT       # Stream with order book depth");
     eprintln!("  trading-bot -p                    # Force production (ignores .env)");
 }
 
@@ -79,6 +81,7 @@ async fn main() {
     let mut use_testnet = false;
     let mut use_production = false;
     let mut live_trading = false;
+    let mut enable_depth = false;
     let mut symbols = Vec::new();
 
     for arg in &args {
@@ -86,6 +89,7 @@ async fn main() {
             "--testnet" | "-t" => use_testnet = true,
             "--production" | "--prod" | "-p" => use_production = true,
             "--live" | "-l" => live_trading = true,
+            "--depth" | "-d" => enable_depth = true,
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -124,6 +128,7 @@ async fn main() {
         environment = %environment,
         symbols = ?symbols,
         live_trading = live_trading,
+        enable_depth = enable_depth,
         "Starting trading bot"
     );
 
@@ -152,6 +157,8 @@ async fn main() {
         symbols: symbols.clone(),
         channel_capacity: 1024,
         environment,
+        enable_depth_stream: enable_depth,
+        depth_update_speed_ms: 100,
     };
 
     let (sender, receiver) = create_event_channel(config.channel_capacity);
@@ -166,23 +173,15 @@ async fn main() {
     // Create channel for execution reports to strategy runner
     let (execution_tx, execution_rx) = mpsc::channel::<ExecutionReport>(256);
 
-    // Spawn market data connector task
-    let connector_metrics = metrics.clone();
-    let market_shutdown_rx = shutdown_rx.clone();
-    let connector_handle = tokio::spawn(async move {
-        if let Err(e) = run_connector(config, sender, market_shutdown_rx, connector_metrics).await {
-            error!(error = %e, "Market connector error");
-        }
-    });
-
-    // Spawn user data stream task (if credentials available)
+    // Create REST client (needed for depth snapshots and authenticated endpoints)
+    // For depth, we can use dummy credentials since depth snapshot is public
     let rest_client: Option<Arc<BinanceRestClient>> = if let Some(ref creds) = credentials {
         match BinanceRestClient::with_environment(creds.clone(), environment) {
             Ok(client) => {
                 let client = Arc::new(client);
                 info!(
                     environment = %client.environment(),
-                    "Created REST client"
+                    "Created REST client with credentials"
                 );
                 // Sync time with Binance server
                 if let Err(e) = client.sync_time().await {
@@ -195,9 +194,46 @@ async fn main() {
                 None
             }
         }
+    } else if enable_depth {
+        // Create REST client without credentials for depth snapshots (public API)
+        match BinanceRestClient::with_environment(
+            auth::ApiCredentials::new(String::new(), String::new()),
+            environment,
+        ) {
+            Ok(client) => {
+                let client = Arc::new(client);
+                info!(
+                    environment = %client.environment(),
+                    "Created REST client for depth snapshots (no credentials)"
+                );
+                Some(client)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to create REST client for depth snapshots");
+                None
+            }
+        }
     } else {
         None
     };
+
+    // Spawn market data connector task
+    let connector_metrics = metrics.clone();
+    let market_shutdown_rx = shutdown_rx.clone();
+    let connector_rest_client = rest_client.clone();
+    let connector_handle = tokio::spawn(async move {
+        if let Err(e) = run_connector(
+            config,
+            sender,
+            market_shutdown_rx,
+            connector_metrics,
+            connector_rest_client,
+        )
+        .await
+        {
+            error!(error = %e, "Market connector error");
+        }
+    });
 
     let user_data_handle = if let Some(ref client) = rest_client {
         let user_metrics = metrics.clone();

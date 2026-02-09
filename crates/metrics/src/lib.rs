@@ -15,6 +15,11 @@ pub struct ConnectorMetrics {
     reconnect_successes: AtomicU64,
     connection_failures: AtomicU64,
 
+    // Depth stream counters
+    depth_updates_received: AtomicU64,
+    depth_snapshots_fetched: AtomicU64,
+    depth_sequence_gaps: AtomicU64,
+
     // Timestamps
     inner: RwLock<MetricsInner>,
 }
@@ -43,6 +48,9 @@ impl ConnectorMetrics {
             reconnect_attempts: AtomicU64::new(0),
             reconnect_successes: AtomicU64::new(0),
             connection_failures: AtomicU64::new(0),
+            depth_updates_received: AtomicU64::new(0),
+            depth_snapshots_fetched: AtomicU64::new(0),
+            depth_sequence_gaps: AtomicU64::new(0),
             inner: RwLock::new(MetricsInner {
                 start_time: Instant::now(),
                 last_trade_time: None,
@@ -87,6 +95,18 @@ impl ConnectorMetrics {
         self.inner.write().last_error_time = Some(Instant::now());
     }
 
+    pub fn inc_depth_updates_received(&self) {
+        self.depth_updates_received.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_depth_snapshots_fetched(&self) {
+        self.depth_snapshots_fetched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_depth_sequence_gaps(&self) {
+        self.depth_sequence_gaps.fetch_add(1, Ordering::Relaxed);
+    }
+
     // --- Getter methods ---
 
     pub fn trades_received(&self) -> u64 {
@@ -115,6 +135,18 @@ impl ConnectorMetrics {
 
     pub fn connection_failures(&self) -> u64 {
         self.connection_failures.load(Ordering::Relaxed)
+    }
+
+    pub fn depth_updates_received(&self) -> u64 {
+        self.depth_updates_received.load(Ordering::Relaxed)
+    }
+
+    pub fn depth_snapshots_fetched(&self) -> u64 {
+        self.depth_snapshots_fetched.load(Ordering::Relaxed)
+    }
+
+    pub fn depth_sequence_gaps(&self) -> u64 {
+        self.depth_sequence_gaps.load(Ordering::Relaxed)
     }
 
     pub fn uptime_secs(&self) -> f64 {
@@ -155,6 +187,9 @@ impl ConnectorMetrics {
             reconnect_attempts: self.reconnect_attempts(),
             reconnect_successes: self.reconnect_successes(),
             connection_failures: self.connection_failures(),
+            depth_updates_received: self.depth_updates_received(),
+            depth_snapshots_fetched: self.depth_snapshots_fetched(),
+            depth_sequence_gaps: self.depth_sequence_gaps(),
             uptime_secs: self.uptime_secs(),
             trades_per_second: self.trades_per_second(),
             secs_since_last_trade: self.secs_since_last_trade(),
@@ -164,7 +199,7 @@ impl ConnectorMetrics {
 }
 
 /// A point-in-time snapshot of metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MetricsSnapshot {
     pub trades_received: u64,
     pub messages_received: u64,
@@ -173,6 +208,9 @@ pub struct MetricsSnapshot {
     pub reconnect_attempts: u64,
     pub reconnect_successes: u64,
     pub connection_failures: u64,
+    pub depth_updates_received: u64,
+    pub depth_snapshots_fetched: u64,
+    pub depth_sequence_gaps: u64,
     pub uptime_secs: f64,
     pub trades_per_second: f64,
     pub secs_since_last_trade: Option<f64>,
@@ -240,6 +278,9 @@ impl std::fmt::Display for MetricsSnapshot {
         writeln!(f, "Trades received:     {}", self.trades_received)?;
         writeln!(f, "Messages received:   {}", self.messages_received)?;
         writeln!(f, "Trades/sec:          {:.2}", self.trades_per_second)?;
+        writeln!(f, "Depth updates:       {}", self.depth_updates_received)?;
+        writeln!(f, "Depth snapshots:     {}", self.depth_snapshots_fetched)?;
+        writeln!(f, "Depth seq gaps:      {}", self.depth_sequence_gaps)?;
         writeln!(f, "Parse errors:        {}", self.parse_errors)?;
         writeln!(f, "WebSocket errors:    {}", self.websocket_errors)?;
         writeln!(f, "Connection failures: {}", self.connection_failures)?;
@@ -313,15 +354,10 @@ mod tests {
         let snapshot = MetricsSnapshot {
             trades_received: 100,
             messages_received: 100,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(5.0), // Recent trade
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Healthy);
@@ -331,17 +367,8 @@ mod tests {
     fn test_health_status_healthy_during_startup() {
         // No trades yet, but uptime is short (still starting up)
         let snapshot = MetricsSnapshot {
-            trades_received: 0,
-            messages_received: 0,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 10.0, // Short uptime
-            trades_per_second: 0.0,
-            secs_since_last_trade: None, // No trades yet
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Healthy);
@@ -352,15 +379,10 @@ mod tests {
         let snapshot = MetricsSnapshot {
             trades_received: 100,
             messages_received: 100,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(45.0), // Between 30s and 60s
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Degraded);
@@ -370,17 +392,8 @@ mod tests {
     fn test_health_status_degraded_no_trades_medium_uptime() {
         // No trades and uptime between 30s and 60s
         let snapshot = MetricsSnapshot {
-            trades_received: 0,
-            messages_received: 0,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 45.0, // Between thresholds
-            trades_per_second: 0.0,
-            secs_since_last_trade: None,
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Degraded);
@@ -391,15 +404,10 @@ mod tests {
         let snapshot = MetricsSnapshot {
             trades_received: 100,
             messages_received: 100,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 300.0,
             trades_per_second: 0.33,
             secs_since_last_trade: Some(90.0), // Over 60s
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Unhealthy);
@@ -409,17 +417,8 @@ mod tests {
     fn test_health_status_unhealthy_no_trades_long_uptime() {
         // No trades ever and uptime over 60s
         let snapshot = MetricsSnapshot {
-            trades_received: 0,
-            messages_received: 0,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 120.0, // Long uptime
-            trades_per_second: 0.0,
-            secs_since_last_trade: None, // Never received trades
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         assert_eq!(snapshot.health_status(), HealthStatus::Unhealthy);
@@ -431,15 +430,10 @@ mod tests {
         let snapshot = MetricsSnapshot {
             trades_received: 100,
             messages_received: 100,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(30.0), // Exactly at threshold
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         // At exactly 30s, it's not > 30, so still healthy
@@ -452,15 +446,10 @@ mod tests {
         let snapshot = MetricsSnapshot {
             trades_received: 100,
             messages_received: 100,
-            parse_errors: 0,
-            websocket_errors: 0,
-            reconnect_attempts: 0,
-            reconnect_successes: 0,
-            connection_failures: 0,
             uptime_secs: 120.0,
             trades_per_second: 0.83,
             secs_since_last_trade: Some(60.0), // Exactly at threshold
-            secs_since_last_error: None,
+            ..Default::default()
         };
 
         // At exactly 60s, it's not > 60, so degraded

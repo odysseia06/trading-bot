@@ -88,7 +88,11 @@ impl Strategy for PriceThresholdStrategy {
         event: &MarketEvent,
         ctx: &StrategyContext,
     ) -> Result<Option<Signal>, StrategyError> {
-        let MarketEvent::Trade(trade) = event;
+        // Only process trade events
+        let trade = match event {
+            MarketEvent::Trade(t) => t,
+            MarketEvent::DepthUpdate(_) => return Ok(None),
+        };
 
         // Only process trades for our symbol
         if trade.symbol != self.config.symbol {

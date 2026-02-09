@@ -259,6 +259,7 @@ impl StrategyRunner {
             if let Some(symbols) = strategy.symbols() {
                 let event_symbol = match &event {
                     MarketEvent::Trade(t) => &t.symbol,
+                    MarketEvent::DepthUpdate(d) => &d.symbol,
                 };
                 if !symbols.iter().any(|s| s == event_symbol) {
                     continue;
@@ -479,28 +480,67 @@ impl StrategyRunner {
         }
     }
 
-    /// Execute a signal in dry-run mode (logging only).
-    fn execute_signal_dry(&self, processed: crate::signal_processor::ProcessedSignal) {
+    /// Execute a signal in dry-run mode with simulated fills.
+    ///
+    /// This generates synthetic execution reports so strategies can track
+    /// their simulated positions and P&L.
+    ///
+    /// Note: We don't call `handle_execution_report` here to avoid recursive
+    /// async calls (strategy callbacks could generate more signals). Instead,
+    /// we directly update position tracker and risk manager.
+    fn execute_signal_dry(&mut self, processed: crate::signal_processor::ProcessedSignal) {
         match &processed.signal.kind {
             SignalKind::Order(intent) => {
+                let client_order_id = processed.client_order_id.as_ref().unwrap();
+
+                // Get current price for the symbol (for market orders)
+                let current_price = self.current_prices.read().get(&intent.symbol).copied();
+
                 info!(
                     strategy_id = %processed.signal.strategy_id,
-                    client_order_id = ?processed.client_order_id,
+                    client_order_id = %client_order_id,
                     symbol = %intent.symbol,
                     side = ?intent.side,
                     order_type = ?intent.order_type,
                     quantity = %intent.quantity,
                     price = ?intent.price,
                     reason = ?processed.signal.reason,
-                    "[DRY RUN] would place order"
+                    "[DRY RUN] simulating order"
                 );
+
+                // Generate simulated fill
+                let timestamp_ms = chrono_timestamp_ms();
+                let report = crate::dry_run::DryRunExecutor::simulate_fill(
+                    intent,
+                    client_order_id,
+                    current_price,
+                    timestamp_ms,
+                );
+
+                info!(
+                    client_order_id = %client_order_id,
+                    exec_price = %report.last_executed_price,
+                    filled_qty = %report.cumulative_filled_qty,
+                    commission = %report.commission,
+                    "[DRY RUN] simulated fill"
+                );
+
+                // Update position tracker with fill information
+                if let Some(ref tracker) = self.position_tracker {
+                    tracker.update_from_fill(&report);
+                }
+
+                // Update risk manager with fill information
+                if let Some(ref risk_manager) = self.risk_manager {
+                    risk_manager.on_fill(&report);
+                }
             }
             SignalKind::Cancel(intent) => {
                 info!(
                     strategy_id = %processed.signal.strategy_id,
                     symbol = %intent.symbol,
                     client_order_id = %intent.client_order_id,
-                    "[DRY RUN] would cancel order"
+                    "[DRY RUN] would cancel order (no-op in simulation)"
                 );
             }
             SignalKind::Modify(intent) => {
@@ -510,7 +550,7 @@ impl StrategyRunner {
                     original_client_order_id = %intent.original_client_order_id,
                     new_price = ?intent.new_price,
                     new_quantity = ?intent.new_quantity,
-                    "[DRY RUN] would modify order"
+                    "[DRY RUN] would modify order (no-op in simulation)"
                 );
             }
         }
@@ -624,6 +664,17 @@ impl StrategyRunner {
                 self.current_prices
                     .write()
                     .insert(trade.symbol.clone(), trade.price);
+            }
+            MarketEvent::DepthUpdate(depth) => {
+                // Update order book in market state
+                self.market_state.update_order_book(
+                    &depth.symbol,
+                    &depth.bids,
+                    &depth.asks,
+                    depth.first_update_id,
+                    depth.final_update_id,
+                    depth.is_snapshot,
+                );
             }
         }
     }

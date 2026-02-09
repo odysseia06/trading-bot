@@ -10,6 +10,17 @@ pub struct ServerTimeResponse {
     pub server_time: i64,
 }
 
+/// Response from GET /api/v3/depth.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DepthSnapshotResponse {
+    #[serde(rename = "lastUpdateId")]
+    pub last_update_id: u64,
+    /// Bid price levels: (price, quantity) as strings.
+    pub bids: Vec<(String, String)>,
+    /// Ask price levels: (price, quantity) as strings.
+    pub asks: Vec<(String, String)>,
+}
+
 /// Response from POST /api/v3/userDataStream.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListenKeyResponse {
@@ -139,6 +150,33 @@ mod tests {
         let json = r#"{"serverTime": 1499827319559}"#;
         let response: ServerTimeResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.server_time, 1499827319559);
+    }
+
+    #[test]
+    fn test_deserialize_depth_snapshot() {
+        let json = r#"{
+            "lastUpdateId": 1027024,
+            "bids": [
+                ["4.00000000", "431.00000000"],
+                ["3.99000000", "200.00000000"]
+            ],
+            "asks": [
+                ["4.00000200", "12.00000000"],
+                ["5.00000000", "28.00000000"]
+            ]
+        }"#;
+        let response: DepthSnapshotResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.last_update_id, 1027024);
+        assert_eq!(response.bids.len(), 2);
+        assert_eq!(response.asks.len(), 2);
+        assert_eq!(
+            response.bids[0],
+            ("4.00000000".to_string(), "431.00000000".to_string())
+        );
+        assert_eq!(
+            response.asks[0],
+            ("4.00000200".to_string(), "12.00000000".to_string())
+        );
     }
 
     #[test]

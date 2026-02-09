@@ -235,6 +235,7 @@ name = "connector-binance"
 version = "0.1.0"
 dependencies = [
  "binance-rest",
+ "chrono",
  "common",
  "connector-core",
  "execution-core",
@@ -242,6 +243,7 @@ dependencies = [
  "metrics",
  "model",
  "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

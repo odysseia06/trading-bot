@@ -38,6 +38,7 @@
 //! runner.run(market_rx, execution_rx, shutdown_rx).await?;
 //! ```
 
+mod dry_run;
 mod error;
 pub mod examples;
 mod risk_config;

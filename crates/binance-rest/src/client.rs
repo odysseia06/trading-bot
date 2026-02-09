@@ -2,7 +2,8 @@
 
 use crate::error::BinanceRestError;
 use crate::responses::{
-    ListenKeyResponse, NewOrderResponse, OrderQueryResponse, ServerTimeResponse,
+    DepthSnapshotResponse, ListenKeyResponse, NewOrderResponse, OrderQueryResponse,
+    ServerTimeResponse,
 };
 use auth::{ApiCredentials, RequestSigner};
 use common::BinanceEnvironment;
@@ -114,6 +115,43 @@ impl BinanceRestClient {
         );
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Market Data
+    // ========================================================================
+
+    /// Get order book depth snapshot.
+    ///
+    /// GET /api/v3/depth
+    ///
+    /// # Parameters
+    /// - `symbol`: Trading pair (e.g., "BTCUSDT")
+    /// - `limit`: Number of levels (5, 10, 20, 50, 100, 500, 1000, 5000). Default: 100
+    ///
+    /// This is used to initialize the order book before applying depth updates
+    /// from the WebSocket stream.
+    pub async fn get_depth_snapshot(
+        &self,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<DepthSnapshotResponse, BinanceRestError> {
+        let query = format!("symbol={}&limit={}", symbol, limit);
+
+        tracing::debug!(symbol = %symbol, limit = limit, "Fetching depth snapshot");
+
+        let response: DepthSnapshotResponse =
+            self.client.get("/api/v3/depth", Some(&query), None).await?;
+
+        tracing::debug!(
+            symbol = %symbol,
+            last_update_id = response.last_update_id,
+            bid_levels = response.bids.len(),
+            ask_levels = response.asks.len(),
+            "Depth snapshot received"
+        );
+
+        Ok(response)
     }
 
     // ========================================================================

@@ -29,6 +29,10 @@ pub struct ConnectorConfig {
     pub channel_capacity: usize,
     /// Binance environment (production or testnet).
     pub environment: BinanceEnvironment,
+    /// Enable order book depth stream (default: false).
+    pub enable_depth_stream: bool,
+    /// Depth update speed in milliseconds (100 or 1000, default: 100).
+    pub depth_update_speed_ms: u32,
 }
 
 impl Default for ConnectorConfig {
@@ -37,6 +41,8 @@ impl Default for ConnectorConfig {
             symbols: vec!["BTCUSDT".to_string()],
             channel_capacity: 1024,
             environment: BinanceEnvironment::default(),
+            enable_depth_stream: false,
+            depth_update_speed_ms: 100,
         }
     }
 }
